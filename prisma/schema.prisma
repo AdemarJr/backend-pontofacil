@@ -1,0 +1,198 @@
+// ================================
+// PONTOFACIL - SCHEMA DO BANCO DE DADOS
+// Multi-tenant com Row-Level Security
+// ================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---- EMPRESAS (TENANTS) ----
+model Tenant {
+  id             String   @id @default(uuid())
+  razaoSocial    String
+  nomeFantasia   String
+  cnpj           String   @unique
+  email          String
+  telefone       String?
+  plano          Plano    @default(BASICO)
+  status         StatusTenant @default(ATIVO)
+
+  // Geofencing
+  geofenceLat    Float?
+  geofenceLng    Float?
+  geofenceRaio   Int      @default(200) // metros
+
+  // Configurações
+  fotoObrigatoria Boolean @default(true)
+  geofenceAtivo   Boolean @default(false)
+  toleranciaMinutos Int   @default(5)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  usuarios       Usuario[]
+  registros      RegistroPonto[]
+  escalas        Escala[]
+  ajustes        AjustePonto[]
+
+  @@map("tenants")
+}
+
+enum Plano {
+  BASICO      // até 10 usuários
+  PROFISSIONAL // até 50 usuários
+  ENTERPRISE  // ilimitado
+}
+
+enum StatusTenant {
+  ATIVO
+  SUSPENSO
+  CANCELADO
+}
+
+// ---- USUÁRIOS ----
+model Usuario {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  nome        String
+  email       String
+  pinHash     String   // PIN numérico hasheado (usado no totem)
+  cargo       String?
+  departamento String?
+  role        Role     @default(COLABORADOR)
+  ativo       Boolean  @default(true)
+  fotoPerfil  String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  registros   RegistroPonto[]
+  escalas     Escala[]
+  ajustesFeitos AjustePonto[] @relation("AdminAjuste")
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@map("usuarios")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN       // Gerente da empresa
+  COLABORADOR
+}
+
+// ---- REGISTROS DE PONTO ----
+model RegistroPonto {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usuarioId   String
+  usuario     Usuario  @relation(fields: [usuarioId], references: [id])
+
+  tipo        TipoPonto
+  dataHora    DateTime @default(now())
+
+  // Localização
+  latitude    Float?
+  longitude   Float?
+  dentroGeofence Boolean?
+
+  // Foto
+  fotoUrl     String?
+  fotoKey     String?  // chave no S3
+
+  // Dispositivo
+  deviceId    String?
+  ipHash      String?
+  userAgent   String?
+
+  // Status
+  validado    Boolean  @default(true)
+  origem      OrigemPonto @default(TOTEM)
+
+  createdAt   DateTime @default(now())
+
+  ajuste      AjustePonto?
+
+  @@index([tenantId, usuarioId])
+  @@index([tenantId, dataHora])
+  @@map("registros_ponto")
+}
+
+enum TipoPonto {
+  ENTRADA
+  SAIDA_ALMOCO
+  RETORNO_ALMOCO
+  SAIDA
+}
+
+enum OrigemPonto {
+  TOTEM
+  APP_INDIVIDUAL
+  ADMIN_MANUAL
+}
+
+// ---- ESCALAS DE TRABALHO ----
+model Escala {
+  id          String   @id @default(uuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usuarioId   String
+  usuario     Usuario  @relation(fields: [usuarioId], references: [id])
+
+  nome        String
+  horaInicio  String   // "08:00"
+  horaFim     String   // "17:00"
+  diasSemana  Int[]    // [1,2,3,4,5] = seg a sex
+
+  cargaHorariaDiaria Float @default(8)
+  intervaloMinutos   Int   @default(60)
+
+  ativo       Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([tenantId, usuarioId])
+  @@map("escalas")
+}
+
+// ---- AJUSTES DE PONTO (AUDITORIA) ----
+model AjustePonto {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  registroId    String   @unique
+  registro      RegistroPonto @relation(fields: [registroId], references: [id])
+  adminId       String
+  admin         Usuario  @relation("AdminAjuste", fields: [adminId], references: [id])
+
+  dataHoraOriginal DateTime
+  dataHoraNova     DateTime
+  motivo           String
+  aprovado         Boolean @default(true)
+
+  createdAt     DateTime @default(now())
+
+  @@index([tenantId])
+  @@map("ajustes_ponto")
+}
+
+// ---- SUPER ADMIN (separado dos tenants) ----
+model SuperAdmin {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  senhaHash String
+  nome      String
+  ativo     Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("super_admins")
+}
