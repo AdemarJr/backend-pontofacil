@@ -17,8 +17,20 @@ const PORT = process.env.PORT || 3001;
 
 // ---- SEGURANÇA ----
 app.use(helmet());
+
+// CORS: FRONTEND_URL ou lista em CORS_ORIGINS (separada por vírgula), ex.: produção + localhost
+const corsOrigins = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || 'http://localhost:3000')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (corsOrigins.includes(origin)) return callback(null, true);
+    console.warn('[CORS] Origem bloqueada:', origin, '| Permitidas:', corsOrigins.join(', '));
+    return callback(new Error('Origem não permitida pelo CORS'));
+  },
   credentials: true,
 }));
 
