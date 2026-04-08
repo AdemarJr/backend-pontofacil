@@ -5,6 +5,7 @@ const {
   listarTenants,
   criarTenant,
   criarAdminTenant,
+  resetSenhaAdminTenant,
   atualizarTenant,
   atualizarStatus,
   stats,
@@ -15,6 +16,7 @@ router.use(autenticar, exigirSuperAdmin);
 router.get('/tenants', listarTenants);
 router.post('/tenants', criarTenant);
 router.post('/tenants/:id/admin', criarAdminTenant);
+router.post('/tenants/:id/admin/:adminId/reset-senha', resetSenhaAdminTenant);
 router.put('/tenants/:id', atualizarTenant);
 router.put('/tenants/:id/status', atualizarStatus);
 router.get('/stats', stats);

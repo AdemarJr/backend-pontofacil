@@ -4,6 +4,11 @@ const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 
+function gerarSenhaTemporaria() {
+  // senha numérica 6 dígitos (compatível com a validação de senha>=6)
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
 async function listarTenants(req, res, next) {
   try {
     const tenants = await prisma.tenant.findMany({
@@ -154,6 +159,38 @@ async function criarAdminTenant(req, res, next) {
   }
 }
 
+/**
+ * Resetar senha (PIN) de um ADMIN da empresa.
+ * Retorna a senha temporária em texto para o Super Admin repassar ao cliente.
+ */
+async function resetSenhaAdminTenant(req, res, next) {
+  try {
+    const { id: tenantId, adminId } = req.params;
+    const senhaTemp = gerarSenhaTemporaria();
+    const pinHash = await bcrypt.hash(senhaTemp, 12);
+
+    const usuario = await prisma.usuario.findFirst({
+      where: { id: adminId, tenantId, role: 'ADMIN' },
+      select: { id: true, nome: true, email: true, ativo: true },
+    });
+    if (!usuario) {
+      return res.status(404).json({ error: 'Administrador não encontrado para esta empresa' });
+    }
+
+    await prisma.usuario.update({
+      where: { id: adminId },
+      data: { pinHash },
+    });
+
+    return res.json({
+      usuario,
+      senhaTemporaria: senhaTemp,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function atualizarStatus(req, res, next) {
   try {
     const { id } = req.params;
@@ -181,6 +218,7 @@ module.exports = {
   listarTenants,
   criarTenant,
   criarAdminTenant,
+  resetSenhaAdminTenant,
   atualizarTenant,
   atualizarStatus,
   stats,
