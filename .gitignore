@@ -29,3 +29,6 @@ coverage/
 tmp/
 temp/
 uploads/
+
+# Explicit: never commit production env
+.env.production
