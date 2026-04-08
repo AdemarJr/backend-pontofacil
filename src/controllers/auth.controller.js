@@ -5,7 +5,33 @@ const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 
+function handlePrismaAuthError(err, res, next) {
+  if (err.code === 'P1001' || err.code === 'P1017') {
+    console.error('[auth] DB indisponível:', err.message);
+    return res.status(503).json({
+      error: 'Banco de dados indisponível. Verifique DATABASE_URL / DIRECT_URL no Railway e se o Prisma rodou migrate deploy.',
+    });
+  }
+  if (typeof err.code === 'string' && err.code.startsWith('P')) {
+    console.error('[auth] Prisma:', err.code, err.message);
+    return res.status(500).json({
+      error:
+        'Erro ao acessar o banco. Rode `npx prisma migrate deploy` e, se necessário, `node prisma/seed.js` no ambiente com DATABASE_URL.',
+    });
+  }
+  return next(err);
+}
+
+function assertJwtConfig() {
+  if (!process.env.JWT_SECRET || !process.env.JWT_REFRESH_SECRET) {
+    const err = new Error('JWT_SECRET e JWT_REFRESH_SECRET devem estar definidos no servidor');
+    err.status = 500;
+    throw err;
+  }
+}
+
 function gerarTokens(payload) {
+  assertJwtConfig();
   const accessToken = jwt.sign(payload, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || '15m',
   });
@@ -61,7 +87,9 @@ async function loginEmail(req, res, next) {
         tenant: usuario.tenant,
       }
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    return handlePrismaAuthError(err, res, next);
+  }
 }
 
 // Login do colaborador no TOTEM (por PIN numérico)
@@ -89,6 +117,7 @@ async function loginPin(req, res, next) {
     }
 
     // Token de curta duração para o totem (apenas registrar ponto)
+    assertJwtConfig();
     const totemToken = jwt.sign(
       { id: usuarioEncontrado.id, tenantId, tipo: 'totem' },
       process.env.JWT_SECRET,
@@ -104,7 +133,9 @@ async function loginPin(req, res, next) {
         fotoPerfil: usuarioEncontrado.fotoPerfil,
       }
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    return handlePrismaAuthError(err, res, next);
+  }
 }
 
 // Refresh de token

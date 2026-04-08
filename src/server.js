@@ -43,6 +43,8 @@ const corsOrigins = [
       'http://127.0.0.1:3002',
       'https://crm-app-pontofacil-frontend.9nb5f0.easypanel.host',
       'https://frontend-pontofacil.vercel.app',
+      'https://pontofacil.digital',
+      'https://www.pontofacil.digital',
       ...envOriginStrings.join(',').split(',').map(normalizeOrigin),
       ...extraOrigins,
     ].filter(Boolean)
@@ -125,6 +127,12 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`🚀 PontoFácil Backend rodando na porta ${PORT}`);
   console.log(`📊 Ambiente: ${process.env.NODE_ENV}`);
+  if (!process.env.JWT_SECRET || !process.env.JWT_REFRESH_SECRET) {
+    console.error('⚠️  JWT_SECRET ou JWT_REFRESH_SECRET ausentes — /api/auth/login retornará erro 500.');
+  }
+  if (!process.env.DIRECT_URL) {
+    console.warn('⚠️  DIRECT_URL ausente — migrações Prisma e alguns comandos podem falhar.');
+  }
 });
 
 module.exports = app;
