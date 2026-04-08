@@ -42,11 +42,19 @@ const corsOrigins = [
       'http://localhost:3002',
       'http://127.0.0.1:3002',
       'https://crm-app-pontofacil-frontend.9nb5f0.easypanel.host',
+      'https://frontend-pontofacil.vercel.app',
       ...envOriginStrings.join(',').split(',').map(normalizeOrigin),
       ...extraOrigins,
     ].filter(Boolean)
   ),
 ];
+
+/** Permite previews/deploys em *.vercel.app quando CORS_ALLOW_VERCEL=1 (opcional). */
+function isVercelPreviewOrigin(origin) {
+  if (process.env.CORS_ALLOW_VERCEL !== '1') return false;
+  const n = normalizeOrigin(origin);
+  return /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(n);
+}
 
 // ---- SEGURANÇA ----
 app.use(
@@ -61,6 +69,7 @@ app.use(
       if (!origin) return callback(null, true);
       const normalized = normalizeOrigin(origin);
       if (corsOrigins.includes(normalized)) return callback(null, true);
+      if (isVercelPreviewOrigin(origin)) return callback(null, true);
       console.warn('[CORS] Origem bloqueada:', origin, '| Permitidas:', corsOrigins.join(', '));
       return callback(null, false);
     },
