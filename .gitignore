@@ -1,0 +1,31 @@
+# Credenciais e ambiente
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+
+# Dependências
+node_modules/
+
+# Build / runtime
+dist/
+*.log
+npm-debug.log*
+
+# SO / editor
+.DS_Store
+.idea/
+*.swp
+*~
+
+# Testes
+coverage/
+.nyc_output/
+
+# Temporários
+tmp/
+temp/
+uploads/
