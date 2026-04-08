@@ -39,6 +39,8 @@ const corsOrigins = [
     [
       'http://localhost:3000',
       'http://127.0.0.1:3000',
+      'http://localhost:3002',
+      'http://127.0.0.1:3002',
       'https://crm-app-pontofacil-frontend.9nb5f0.easypanel.host',
       ...envOriginStrings.join(',').split(',').map(normalizeOrigin),
       ...extraOrigins,
