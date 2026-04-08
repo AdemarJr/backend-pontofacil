@@ -5,6 +5,6 @@ const { registrar, listar, ultimoPonto } = require('../controllers/ponto.control
 
 router.post('/registrar', autenticar, registrar);
 router.get('/', autenticar, exigirAdmin, listar);
-router.get('/ultimo/:usuarioId', ultimoPonto); // público para o totem (valida token no body)
+router.get('/ultimo/:usuarioId', autenticar, ultimoPonto);
 
 module.exports = router;

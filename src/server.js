@@ -13,6 +13,8 @@ const tenantRoutes = require('./routes/tenant.routes');
 const usuarioRoutes = require('./routes/usuario.routes');
 const pontoRoutes = require('./routes/ponto.routes');
 const relatorioRoutes = require('./routes/relatorio.routes');
+const escalaRoutes = require('./routes/escala.routes');
+const localRoutes = require('./routes/local.routes');
 const superAdminRoutes = require('./routes/superadmin.routes');
 
 const app = express();
@@ -107,6 +109,8 @@ app.use('/api/tenants', tenantRoutes);
 app.use('/api/usuarios', usuarioRoutes);
 app.use('/api/ponto', pontoLimiter, pontoRoutes);
 app.use('/api/relatorios', relatorioRoutes);
+app.use('/api/escalas', escalaRoutes);
+app.use('/api/locais-registro', localRoutes);
 app.use('/api/super-admin', superAdminRoutes);
 
 // Health check

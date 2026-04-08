@@ -25,4 +25,16 @@ function validarGeofence(latColaborador, lngColaborador, latEmpresa, lngEmpresa,
   return distancia <= raioMetros;
 }
 
-module.exports = { validarGeofence, calcularDistancia };
+/** @param {Array<{latitude:number,longitude:number,raioMetros:number,id?:string}>} locais */
+function validarEmAlgumLocal(lat, lng, locais) {
+  if (!locais?.length) return { ok: false };
+  for (const loc of locais) {
+    const r = loc.raioMetros ?? 200;
+    if (validarGeofence(lat, lng, loc.latitude, loc.longitude, r)) {
+      return { ok: true, localId: loc.id };
+    }
+  }
+  return { ok: false };
+}
+
+module.exports = { validarGeofence, calcularDistancia, validarEmAlgumLocal };

@@ -12,6 +12,7 @@ async function listar(req, res, next) {
       select: {
         id: true, nome: true, email: true, cargo: true,
         departamento: true, role: true, ativo: true, createdAt: true,
+        localRegistroId: true,
       },
       orderBy: { nome: 'asc' },
     });
@@ -36,7 +37,7 @@ async function buscarPorId(req, res, next) {
 
 async function criar(req, res, next) {
   try {
-    const { nome, email, pin, cargo, departamento, role } = req.body;
+    const { nome, email, pin, cargo, departamento, role, localRegistroId } = req.body;
 
     if (!nome || !email || !pin) {
       return res.status(400).json({ error: 'Nome, email e PIN são obrigatórios' });
@@ -52,6 +53,14 @@ async function criar(req, res, next) {
 
     const pinHash = await bcrypt.hash(pin, 12);
     const pinEncrypted = encryptPin(pin);
+
+    if (localRegistroId) {
+      const loc = await prisma.localRegistro.findFirst({
+        where: { id: localRegistroId, tenantId: req.tenantId, ativo: true },
+      });
+      if (!loc) return res.status(400).json({ error: 'Local de registro inválido' });
+    }
+
     const usuario = await prisma.usuario.create({
       data: {
         tenantId: req.tenantId,
@@ -59,6 +68,7 @@ async function criar(req, res, next) {
         cargo: cargo || null,
         departamento: departamento || null,
         role: role === 'ADMIN' ? 'ADMIN' : 'COLABORADOR',
+        ...(localRegistroId && { localRegistroId }),
       },
       select: { id: true, nome: true, email: true, cargo: true, role: true, createdAt: true }
     });
@@ -69,7 +79,7 @@ async function criar(req, res, next) {
 
 async function atualizar(req, res, next) {
   try {
-    const { nome, cargo, departamento, ativo, pin } = req.body;
+    const { nome, cargo, departamento, ativo, pin, localRegistroId } = req.body;
 
     const dados = {
       ...(nome && { nome }),
@@ -77,6 +87,18 @@ async function atualizar(req, res, next) {
       ...(departamento !== undefined && { departamento }),
       ...(ativo !== undefined && { ativo: Boolean(ativo) }),
     };
+
+    if (localRegistroId !== undefined) {
+      if (localRegistroId === null || localRegistroId === '') {
+        dados.localRegistroId = null;
+      } else {
+        const loc = await prisma.localRegistro.findFirst({
+          where: { id: localRegistroId, tenantId: req.tenantId, ativo: true },
+        });
+        if (!loc) return res.status(400).json({ error: 'Local de registro inválido' });
+        dados.localRegistroId = localRegistroId;
+      }
+    }
 
     if (pin) {
       if (pin.length < 4 || !/^\d+$/.test(pin)) {

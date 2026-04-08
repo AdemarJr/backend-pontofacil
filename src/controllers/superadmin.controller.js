@@ -214,6 +214,34 @@ async function stats(req, res, next) {
   } catch (err) { next(err); }
 }
 
+/** Remove todos os registros de ponto e ajustes de um tenant (irreversível). */
+async function limparRegistrosTenant(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { confirmarNomeFantasia } = req.body;
+
+    const tenant = await prisma.tenant.findUnique({ where: { id } });
+    if (!tenant) return res.status(404).json({ error: 'Empresa não encontrada' });
+
+    if (!confirmarNomeFantasia || String(confirmarNomeFantasia).trim() !== tenant.nomeFantasia) {
+      return res.status(400).json({
+        error: 'Confirmação inválida. Envie confirmarNomeFantasia igual ao nome fantasia cadastrado.',
+      });
+    }
+
+    const delAjustes = await prisma.ajustePonto.deleteMany({ where: { tenantId: id } });
+    const delRegistros = await prisma.registroPonto.deleteMany({ where: { tenantId: id } });
+
+    res.json({
+      sucesso: true,
+      removidosAjustes: delAjustes.count,
+      removidosRegistros: delRegistros.count,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   listarTenants,
   criarTenant,
@@ -222,4 +250,5 @@ module.exports = {
   atualizarTenant,
   atualizarStatus,
   stats,
+  limparRegistrosTenant,
 };
