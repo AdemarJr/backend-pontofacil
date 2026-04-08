@@ -67,6 +67,7 @@ model Usuario {
   nome        String
   email       String
   pinHash     String   // PIN numérico hasheado (usado no totem)
+  pinEncrypted String? // PIN criptografado (reversível) para exibição por ADMIN/SUPER_ADMIN
   cargo       String?
   departamento String?
   role        Role     @default(COLABORADOR)

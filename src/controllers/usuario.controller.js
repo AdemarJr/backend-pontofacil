@@ -1,6 +1,7 @@
 // src/controllers/usuario.controller.js
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
+const { encryptPin, decryptPin } = require('../utils/pinCrypto');
 
 const prisma = new PrismaClient();
 
@@ -50,10 +51,11 @@ async function criar(req, res, next) {
     if (existente) return res.status(409).json({ error: 'Email já cadastrado nesta empresa' });
 
     const pinHash = await bcrypt.hash(pin, 12);
+    const pinEncrypted = encryptPin(pin);
     const usuario = await prisma.usuario.create({
       data: {
         tenantId: req.tenantId,
-        nome, email, pinHash,
+        nome, email, pinHash, pinEncrypted,
         cargo: cargo || null,
         departamento: departamento || null,
         role: role === 'ADMIN' ? 'ADMIN' : 'COLABORADOR',
@@ -81,6 +83,7 @@ async function atualizar(req, res, next) {
         return res.status(400).json({ error: 'PIN inválido' });
       }
       dados.pinHash = await bcrypt.hash(pin, 12);
+      dados.pinEncrypted = encryptPin(pin);
     }
 
     const usuario = await prisma.usuario.updateMany({
@@ -103,4 +106,25 @@ async function remover(req, res, next) {
   } catch (err) { next(err); }
 }
 
-module.exports = { listar, buscarPorId, criar, atualizar, remover };
+async function obterPin(req, res, next) {
+  try {
+    const usuario = await prisma.usuario.findFirst({
+      where: { id: req.params.id, tenantId: req.tenantId },
+      select: { id: true, pinEncrypted: true },
+    });
+    if (!usuario) return res.status(404).json({ error: 'Usuário não encontrado' });
+    if (!usuario.pinEncrypted) {
+      return res.status(404).json({
+        error:
+          'PIN não disponível para exibição (usuário criado antes desta função). Use “Reset PIN” uma vez para armazenar o PIN criptografado.',
+      });
+    }
+    const pin = decryptPin(usuario.pinEncrypted);
+    if (!pin) return res.status(500).json({ error: 'Falha ao descriptografar PIN' });
+    return res.json({ pin });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listar, buscarPorId, criar, atualizar, remover, obterPin };
