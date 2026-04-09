@@ -86,14 +86,31 @@ async function criar(req, res, next) {
 
 async function atualizar(req, res, next) {
   try {
-    const { nome, cargo, departamento, ativo, pin, localRegistroId } = req.body;
+    const { nome, email, cargo, departamento, ativo, pin, localRegistroId } = req.body;
 
     const dados = {
       ...(nome && { nome }),
+      ...(email !== undefined && { email: String(email).trim().toLowerCase() }),
       ...(cargo !== undefined && { cargo }),
       ...(departamento !== undefined && { departamento }),
       ...(ativo !== undefined && { ativo: Boolean(ativo) }),
     };
+
+    if (email !== undefined) {
+      const emailNorm = String(email || '').trim().toLowerCase();
+      if (!emailNorm) return res.status(400).json({ error: 'Email é obrigatório' });
+
+      const dup = await prisma.usuario.findFirst({
+        where: {
+          tenantId: req.tenantId,
+          email: emailNorm,
+          NOT: { id: req.params.id },
+        },
+        select: { id: true },
+      });
+      if (dup) return res.status(409).json({ error: 'Email já cadastrado nesta empresa' });
+      dados.email = emailNorm;
+    }
 
     if (localRegistroId !== undefined) {
       if (localRegistroId === null || localRegistroId === '') {

@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 const { sendMail, isMailConfigured } = require('./mail.service');
+const { decryptPin } = require('../utils/pinCrypto');
 
 const prisma = new PrismaClient();
 
@@ -15,6 +16,14 @@ function resetExpiresHours() {
 
 function buildResetLink(token) {
   return `${frontendBase()}/redefinir-senha?token=${encodeURIComponent(token)}`;
+}
+
+function meuPontoLink() {
+  return `${frontendBase()}/meu-ponto`;
+}
+
+function shouldSendPinInEmail() {
+  return process.env.SEND_PIN_IN_EMAIL === '1' || process.env.SEND_PIN_IN_EMAIL === 'true';
 }
 
 function escHtml(s) {
@@ -58,17 +67,48 @@ async function sendConviteUsuario(userId) {
   const token = await issueUsuarioToken(u.id);
   const link = buildResetLink(token);
   const empresa = u.tenant?.nomeFantasia || 'sua empresa';
+  const linkMeuPonto = meuPontoLink();
+  const emailLogin = u.email;
+  const pin =
+    shouldSendPinInEmail() && u.pinEncrypted
+      ? (() => {
+          try {
+            return decryptPin(u.pinEncrypted);
+          } catch (e) {
+            console.warn('[mail] Falha ao descriptografar PIN para e-mail:', e.message);
+            return null;
+          }
+        })()
+      : null;
+
+  const isColaborador = u.role === 'COLABORADOR';
+  const tituloAcesso = isColaborador ? 'Meu Ponto (colaborador)' : 'Painel (admin/gerente)';
   const subject = `PontoFácil — defina sua senha de acesso (${empresa})`;
   const text = [
     `Olá, ${u.nome}.`,
     '',
     `Você foi cadastrado no PontoFácil (${empresa}).`,
-    'Defina uma senha para acessar o sistema pelo navegador (login em ' + frontendBase() + '/login — painel ou Meu ponto).',
-    'Seu PIN do totem é o informado pelo administrador (não enviamos o PIN por e-mail).',
+    'Defina uma senha para acessar o sistema pelo navegador (login em ' + frontendBase() + '/login).',
+    '',
+    `Acesso: ${tituloAcesso}`,
+    `Link para bater ponto (Meu Ponto): ${linkMeuPonto}`,
+    `E-mail de login: ${emailLogin}`,
+    ...(pin ? [`PIN do totem: ${pin}`] : []),
+    ...(pin
+      ? ['']
+      : [
+          'PIN do totem: informado pelo administrador.',
+          '(Por segurança, este servidor está configurado para não enviar PIN por e-mail.)',
+        ]),
     '',
     link,
     '',
     `Este link expira em aproximadamente ${resetExpiresHours()} horas.`,
+    '',
+    'Como usar (bem simples):',
+    `1) Acesse ${frontendBase()}/login`,
+    '2) Entre com seu e-mail e a senha que você vai criar no link acima',
+    `3) Para bater ponto: abra ${linkMeuPonto} e registre normalmente`,
     '',
     'Se você não reconhece este cadastro, ignore este e-mail.',
   ].join('\n');
@@ -76,10 +116,24 @@ async function sendConviteUsuario(userId) {
   const html = `
     <p>Olá, <strong>${escHtml(u.nome)}</strong>.</p>
     <p>Você foi cadastrado no <strong>PontoFácil</strong> (${escHtml(empresa)}).</p>
-    <p>Clique no botão abaixo para <strong>definir sua senha de acesso</strong> pelo navegador (painel ou Meu ponto).</p>
+    <p>Clique no botão abaixo para <strong>definir sua senha de acesso</strong>.</p>
     <p><a href="${link}" style="display:inline-block;padding:12px 20px;background:#1D9E75;color:#fff;text-decoration:none;border-radius:8px;">Definir minha senha</a></p>
     <p style="font-size:13px;color:#666;">Ou copie o link: <br/><span style="word-break:break-all">${escHtml(link)}</span></p>
-    <p style="font-size:13px;color:#666;">Seu PIN do totem continua o que o RH informou. Link expira em cerca de ${resetExpiresHours()} horas.</p>
+    <hr style="border:none;border-top:1px solid #eee;margin:18px 0;" />
+    <p><strong>Link para bater ponto (Meu Ponto):</strong><br/><a href="${linkMeuPonto}">${escHtml(linkMeuPonto)}</a></p>
+    <p><strong>E-mail de login:</strong> ${escHtml(emailLogin)}</p>
+    ${
+      pin
+        ? `<p><strong>PIN do totem:</strong> ${escHtml(pin)}</p>`
+        : `<p style="font-size:13px;color:#666;"><strong>PIN do totem:</strong> informado pelo administrador (não enviamos por e-mail).</p>`
+    }
+    <p style="font-size:13px;color:#666;line-height:1.5;">
+      <strong>Como usar:</strong><br/>
+      1) Acesse <a href="${frontendBase()}/login">${escHtml(frontendBase())}/login</a><br/>
+      2) Entre com seu e-mail e a senha que você criou<br/>
+      3) Para bater ponto, abra o Meu Ponto e registre normalmente
+    </p>
+    <p style="font-size:13px;color:#666;">Link para criar senha expira em cerca de ${resetExpiresHours()} horas.</p>
   `;
 
   const r = await sendMail({ to: u.email, subject, text, html });
