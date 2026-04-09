@@ -47,8 +47,10 @@ async function criar(req, res, next) {
       return res.status(400).json({ error: 'PIN deve ter 4 a 6 dígitos numéricos' });
     }
 
+    const emailNorm = String(email).trim().toLowerCase();
+
     const existente = await prisma.usuario.findFirst({
-      where: { email, tenantId: req.tenantId }
+      where: { email: emailNorm, tenantId: req.tenantId }
     });
     if (existente) return res.status(409).json({ error: 'Email já cadastrado nesta empresa' });
 
@@ -65,7 +67,7 @@ async function criar(req, res, next) {
     const usuario = await prisma.usuario.create({
       data: {
         tenantId: req.tenantId,
-        nome, email, pinHash, pinEncrypted,
+        nome, email: emailNorm, pinHash, pinEncrypted,
         cargo: cargo || null,
         departamento: departamento || null,
         role: role === 'ADMIN' ? 'ADMIN' : 'COLABORADOR',
@@ -75,12 +77,23 @@ async function criar(req, res, next) {
     });
 
     let conviteEmailEnviado = false;
+    let conviteEmailMotivo = enviarConviteEmail === false ? 'desativado_pelo_admin' : null;
     if (enviarConviteEmail !== false) {
       const r = await sendConviteUsuario(usuario.id);
       conviteEmailEnviado = Boolean(r.ok && !r.skipped);
+      if (!conviteEmailEnviado) {
+        if (r.skipped) conviteEmailMotivo = r.reason || 'smtp_nao_configurado';
+        else conviteEmailMotivo = r.reason || 'falha_envio';
+      } else {
+        conviteEmailMotivo = 'enviado';
+      }
     }
 
-    res.status(201).json({ ...usuario, conviteEmailEnviado });
+    res.status(201).json({
+      ...usuario,
+      conviteEmailEnviado,
+      ...(conviteEmailMotivo && { conviteEmailMotivo }),
+    });
   } catch (err) { next(err); }
 }
 

@@ -24,14 +24,20 @@ function getTransporter() {
 
 /**
  * @param {{ to: string; subject: string; text: string; html?: string }} opts
- * @returns {Promise<{ ok: boolean; skipped?: boolean }>}
+ * @returns {Promise<{ ok: boolean; skipped?: boolean; reason?: string; error?: string }>}
  */
 async function sendMail(opts) {
   const { to, subject, text, html } = opts;
   const t = getTransporter();
   if (!t) {
     console.warn('[mail] SMTP não configurado (SMTP_HOST / MAIL_FROM) — e-mail não enviado para', to);
-    return { ok: false, skipped: true };
+    return { ok: false, skipped: true, reason: 'smtp_nao_configurado' };
+  }
+  if (process.env.SMTP_USER === undefined || process.env.SMTP_USER === '') {
+    console.warn(
+      '[mail] SMTP_USER vazio — muitos provedores (ex.: Hostinger) exigem autenticação. Envio pode falhar. Destino:',
+      to
+    );
   }
   try {
     await t.sendMail({
@@ -43,8 +49,8 @@ async function sendMail(opts) {
     });
     return { ok: true };
   } catch (e) {
-    console.error('[mail] Falha ao enviar:', e.message);
-    return { ok: false, skipped: false };
+    console.error('[mail] Falha ao enviar:', e?.message || e);
+    return { ok: false, skipped: false, reason: 'falha_envio', error: e?.message || String(e) };
   }
 }
 

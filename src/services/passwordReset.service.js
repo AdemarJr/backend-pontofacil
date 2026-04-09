@@ -137,7 +137,9 @@ async function sendConviteUsuario(userId) {
   `;
 
   const r = await sendMail({ to: u.email, subject, text, html });
-  return { ok: r.ok, skipped: r.skipped };
+  if (r.ok) return { ok: true, skipped: false };
+  if (r.skipped) return { ok: false, skipped: true, reason: r.reason || 'smtp_nao_configurado' };
+  return { ok: false, skipped: false, reason: r.reason || 'falha_envio', error: r.error };
 }
 
 async function sendResetUsuarioEmail(usuario) {
