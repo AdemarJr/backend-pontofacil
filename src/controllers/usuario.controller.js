@@ -2,6 +2,7 @@
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 const { encryptPin, decryptPin } = require('../utils/pinCrypto');
+const { sendConviteUsuario } = require('../services/passwordReset.service');
 
 const prisma = new PrismaClient();
 
@@ -37,7 +38,7 @@ async function buscarPorId(req, res, next) {
 
 async function criar(req, res, next) {
   try {
-    const { nome, email, pin, cargo, departamento, role, localRegistroId } = req.body;
+    const { nome, email, pin, cargo, departamento, role, localRegistroId, enviarConviteEmail } = req.body;
 
     if (!nome || !email || !pin) {
       return res.status(400).json({ error: 'Nome, email e PIN são obrigatórios' });
@@ -73,7 +74,13 @@ async function criar(req, res, next) {
       select: { id: true, nome: true, email: true, cargo: true, role: true, createdAt: true }
     });
 
-    res.status(201).json(usuario);
+    let conviteEmailEnviado = false;
+    if (enviarConviteEmail !== false) {
+      const r = await sendConviteUsuario(usuario.id);
+      conviteEmailEnviado = Boolean(r.ok && !r.skipped);
+    }
+
+    res.status(201).json({ ...usuario, conviteEmailEnviado });
   } catch (err) { next(err); }
 }
 

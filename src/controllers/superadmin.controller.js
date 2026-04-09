@@ -1,6 +1,8 @@
 // src/controllers/superadmin.controller.js
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
+const { sendConviteUsuario } = require('../services/passwordReset.service');
 
 const prisma = new PrismaClient();
 
@@ -36,16 +38,30 @@ async function criarTenant(req, res, next) {
     if (!razaoSocial || !nomeFantasia || !cnpj || !email) {
       return res.status(400).json({ error: 'Razão social, nome fantasia, CNPJ e e-mail da empresa são obrigatórios' });
     }
-    if (!adminNome || !adminEmail || !adminSenha) {
-      return res.status(400).json({ error: 'Nome, e-mail e senha do administrador da empresa são obrigatórios' });
+    if (!adminNome || !adminEmail) {
+      return res.status(400).json({ error: 'Nome e e-mail do administrador da empresa são obrigatórios' });
     }
-    if (String(adminSenha).length < 6) {
-      return res.status(400).json({ error: 'Senha do administrador deve ter no mínimo 6 caracteres' });
+    const senhaStr = adminSenha != null ? String(adminSenha) : '';
+    if (senhaStr.length > 0 && senhaStr.length < 6) {
+      return res.status(400).json({
+        error: 'Senha do administrador deve ter no mínimo 6 caracteres, ou deixe em branco para enviar o primeiro acesso por e-mail',
+      });
     }
 
-    const pinHash = await bcrypt.hash(adminSenha, 12);
+    const comSenha = senhaStr.length >= 6;
+    let pinHash;
+    let senhaHash = null;
+    if (comSenha) {
+      const hash = await bcrypt.hash(senhaStr, 12);
+      pinHash = hash;
+      senhaHash = hash;
+    } else {
+      pinHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
+    }
 
-    const tenant = await prisma.$transaction(async (tx) => {
+    const adminEmailNorm = String(adminEmail).trim().toLowerCase();
+
+    const resultado = await prisma.$transaction(async (tx) => {
       const t = await tx.tenant.create({
         data: {
           razaoSocial,
@@ -56,20 +72,31 @@ async function criarTenant(req, res, next) {
           plano: plano || 'BASICO',
         },
       });
-      await tx.usuario.create({
+      const u = await tx.usuario.create({
         data: {
           tenantId: t.id,
-          nome: adminNome,
-          email: adminEmail,
+          nome: adminNome.trim(),
+          email: adminEmailNorm,
           pinHash,
+          senhaHash,
           cargo: 'Administrador',
           role: 'ADMIN',
         },
       });
-      return t;
+      return { tenant: t, admin: u };
     });
 
-    res.status(201).json(tenant);
+    let conviteAdminEnviado = false;
+    if (!comSenha) {
+      const r = await sendConviteUsuario(resultado.admin.id);
+      conviteAdminEnviado = Boolean(r.ok && !r.skipped);
+    }
+
+    res.status(201).json({
+      ...resultado.tenant,
+      conviteAdminEnviado,
+      primeiroAcessoPorEmail: !comSenha,
+    });
   } catch (err) {
     if (err.code === 'P2002') {
       return res.status(409).json({ error: 'CNPJ ou outro dado único já cadastrado' });
@@ -117,11 +144,14 @@ async function criarAdminTenant(req, res, next) {
     const { id: tenantId } = req.params;
     const { nome, email, senha } = req.body;
 
-    if (!nome || !email || !senha) {
-      return res.status(400).json({ error: 'Nome, e-mail e senha são obrigatórios' });
+    if (!nome || !email) {
+      return res.status(400).json({ error: 'Nome e e-mail são obrigatórios' });
     }
-    if (String(senha).length < 6) {
-      return res.status(400).json({ error: 'Senha deve ter no mínimo 6 caracteres' });
+    const senhaStr = senha != null ? String(senha) : '';
+    if (senhaStr.length > 0 && senhaStr.length < 6) {
+      return res.status(400).json({
+        error: 'Senha deve ter no mínimo 6 caracteres, ou deixe em branco para enviar o primeiro acesso por e-mail',
+      });
     }
 
     const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
@@ -137,20 +167,37 @@ async function criarAdminTenant(req, res, next) {
       return res.status(409).json({ error: 'Já existe usuário com este e-mail nesta empresa' });
     }
 
-    const pinHash = await bcrypt.hash(senha, 12);
+    const comSenha = senhaStr.length >= 6;
+    let pinHash;
+    let senhaHash = null;
+    if (comSenha) {
+      const hash = await bcrypt.hash(senhaStr, 12);
+      pinHash = hash;
+      senhaHash = hash;
+    } else {
+      pinHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12);
+    }
+
     const usuario = await prisma.usuario.create({
       data: {
         tenantId,
         nome: nome.trim(),
         email: String(email).trim().toLowerCase(),
         pinHash,
+        senhaHash,
         cargo: 'Administrador',
         role: 'ADMIN',
       },
       select: { id: true, nome: true, email: true, role: true },
     });
 
-    res.status(201).json(usuario);
+    let conviteEmailEnviado = false;
+    if (!comSenha) {
+      const r = await sendConviteUsuario(usuario.id);
+      conviteEmailEnviado = Boolean(r.ok && !r.skipped);
+    }
+
+    res.status(201).json({ ...usuario, conviteEmailEnviado, primeiroAcessoPorEmail: !comSenha });
   } catch (err) {
     if (err.code === 'P2002') {
       return res.status(409).json({ error: 'E-mail já cadastrado nesta empresa' });
@@ -179,7 +226,12 @@ async function resetSenhaAdminTenant(req, res, next) {
 
     await prisma.usuario.update({
       where: { id: adminId },
-      data: { pinHash },
+      data: {
+        pinHash,
+        senhaHash: pinHash,
+        passwordResetToken: null,
+        passwordResetExpires: null,
+      },
     });
 
     return res.json({

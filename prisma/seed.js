@@ -42,18 +42,19 @@ async function main() {
   });
   console.log('✅ Tenant demo criado:', tenant.nomeFantasia);
 
-  // Gerente (ADMIN) — mesma senha no login por email (campo pinHash no banco)
+  // Gerente (ADMIN) — login web: senhaHash (e pinHash alinhado para compatibilidade / totem)
   const gerenteEmail = 'gerente@democorp.com.br';
   const gerenteSenha = 'Admin@123456';
   const pinHashGerente = await bcrypt.hash(gerenteSenha, 12);
   const admin = await prisma.usuario.upsert({
     where: { tenantId_email: { tenantId: tenant.id, email: gerenteEmail } },
-    update: { pinHash: pinHashGerente },
+    update: { pinHash: pinHashGerente, senhaHash: pinHashGerente },
     create: {
       tenantId: tenant.id,
       nome: 'João Gerente',
       email: gerenteEmail,
       pinHash: pinHashGerente,
+      senhaHash: pinHashGerente,
       cargo: 'Gerente',
       role: 'ADMIN',
     },

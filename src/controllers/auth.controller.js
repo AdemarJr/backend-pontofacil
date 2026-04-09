@@ -2,6 +2,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
+const { requestForgotByEmail, resetPasswordWithToken } = require('../services/passwordReset.service');
 
 const prisma = new PrismaClient();
 
@@ -73,7 +74,8 @@ async function loginEmail(req, res, next) {
       return res.status(403).json({ error: 'Empresa com acesso suspenso' });
     }
 
-    const valido = await bcrypt.compare(senha, usuario.pinHash);
+    const hashLogin = usuario.senhaHash || usuario.pinHash;
+    const valido = await bcrypt.compare(senha, hashLogin);
     if (!valido) return res.status(401).json({ error: 'Credenciais inválidas' });
 
     const tokens = gerarTokens({ id: usuario.id, tenantId: usuario.tenantId, role: usuario.role });
@@ -152,4 +154,42 @@ async function refreshToken(req, res, next) {
   }
 }
 
-module.exports = { loginEmail, loginPin, refreshToken };
+/** Esqueci minha senha — envia e-mail com link (não revela se o e-mail existe) */
+async function esqueciSenha(req, res, next) {
+  try {
+    const { email, tenantId } = req.body;
+    if (!email) return res.status(400).json({ error: 'E-mail é obrigatório' });
+
+    try {
+      await requestForgotByEmail(email, tenantId);
+    } catch (e) {
+      if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+      throw e;
+    }
+
+    res.json({
+      mensagem:
+        'Se encontrarmos uma conta para este e-mail, enviaremos instruções para redefinir a senha. Verifique a caixa de entrada e o spam.',
+    });
+  } catch (err) {
+    return handlePrismaAuthError(err, res, next);
+  }
+}
+
+/** Redefinir senha pelo token recebido por e-mail */
+async function redefinirSenha(req, res, next) {
+  try {
+    const { token, senha } = req.body;
+    try {
+      await resetPasswordWithToken(token, senha);
+    } catch (e) {
+      if (e.status) return res.status(e.status).json({ error: e.message });
+      throw e;
+    }
+    res.json({ sucesso: true, mensagem: 'Senha atualizada. Você já pode entrar com a nova senha.' });
+  } catch (err) {
+    return handlePrismaAuthError(err, res, next);
+  }
+}
+
+module.exports = { loginEmail, loginPin, refreshToken, esqueciSenha, redefinirSenha };
