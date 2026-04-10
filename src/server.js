@@ -16,6 +16,7 @@ const relatorioRoutes = require('./routes/relatorio.routes');
 const escalaRoutes = require('./routes/escala.routes');
 const localRoutes = require('./routes/local.routes');
 const superAdminRoutes = require('./routes/superadmin.routes');
+const healthRoutes = require('./routes/health.routes');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -117,6 +118,7 @@ app.use('/api/super-admin', superAdminRoutes);
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+app.use('/api/health', healthRoutes);
 
 // Handler de erros global
 app.use((err, req, res, next) => {
