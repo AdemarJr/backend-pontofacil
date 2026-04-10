@@ -76,30 +76,37 @@ async function criar(req, res, next) {
       select: { id: true, nome: true, email: true, cargo: true, role: true, createdAt: true }
     });
 
-    let conviteEmailEnviado = false;
-    let conviteEmailMotivo = enviarConviteEmail === false ? 'desativado_pelo_admin' : null;
-    if (enviarConviteEmail !== false) {
-      try {
-        const r = await sendConviteUsuario(usuario.id);
-        conviteEmailEnviado = Boolean(r.ok && !r.skipped);
-        if (!conviteEmailEnviado) {
-          if (r.skipped) conviteEmailMotivo = r.reason || 'smtp_nao_configurado';
-          else conviteEmailMotivo = r.reason || 'falha_envio';
-        } else {
-          conviteEmailMotivo = 'enviado';
-        }
-      } catch (e) {
-        console.error('[usuarios/criar] Convite por e-mail falhou (usuário já criado):', e?.message || e);
-        conviteEmailEnviado = false;
-        conviteEmailMotivo = 'falha_envio';
-      }
+    // Convite por SMTP pode demorar ou travar — responde na hora e envia em segundo plano (evita timeout no cliente).
+    if (enviarConviteEmail === false) {
+      return res.status(201).json({
+        ...usuario,
+        conviteEmailEnviado: false,
+        conviteEmailMotivo: 'desativado_pelo_admin',
+      });
     }
 
     res.status(201).json({
       ...usuario,
-      conviteEmailEnviado,
-      ...(conviteEmailMotivo && { conviteEmailMotivo }),
+      conviteEmailEnviado: false,
+      conviteEmailMotivo: 'envio_em_segundo_plano',
     });
+
+    sendConviteUsuario(usuario.id)
+      .then((r) => {
+        if (r?.ok && !r?.skipped) {
+          console.log('[usuarios/criar] Convite enviado (segundo plano) para', usuario.email);
+        } else {
+          console.warn(
+            '[usuarios/criar] Convite não enviado (segundo plano):',
+            r?.reason || 'desconhecido',
+            r?.error || '',
+            r?.skipped ? '(skipped)' : ''
+          );
+        }
+      })
+      .catch((e) => console.error('[usuarios/criar] Convite (segundo plano):', e?.message || e));
+
+    return;
   } catch (err) { next(err); }
 }
 
