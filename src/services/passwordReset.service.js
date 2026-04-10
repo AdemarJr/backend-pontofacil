@@ -187,6 +187,18 @@ async function sendResetSuperAdminEmail(sa) {
   return sendMail({ to: sa.email, subject, text, html });
 }
 
+function assertMailOk(r) {
+  if (r?.ok) return;
+  const err = new Error(
+    r?.skipped
+      ? 'Servidor sem SMTP configurado para envio de e-mails. Contate o administrador.'
+      : `Falha ao enviar e-mail. Verifique SMTP (host/porta/secure/usuário/senha) e logs do servidor.`
+  );
+  err.status = r?.skipped ? 503 : 502;
+  err.code = r?.skipped ? 'SMTP_NAO_CONFIGURADO' : 'SMTP_FALHA_ENVIO';
+  throw err;
+}
+
 /**
  * Esqueci minha senha — e-mail pode existir em mais de um tenant.
  */
@@ -200,7 +212,8 @@ async function requestForgotByEmail(emailRaw, tenantIdOpt) {
 
   const sa = await prisma.superAdmin.findUnique({ where: { email } });
   if (sa && sa.ativo) {
-    await sendResetSuperAdminEmail(sa);
+    const r = await sendResetSuperAdminEmail(sa);
+    assertMailOk(r);
     return { destino: 'super_admin' };
   }
 
@@ -229,11 +242,13 @@ async function requestForgotByEmail(emailRaw, tenantIdOpt) {
       err.status = 404;
       throw err;
     }
-    await sendResetUsuarioEmail(u);
+    const r = await sendResetUsuarioEmail(u);
+    assertMailOk(r);
     return { destino: 'usuario' };
   }
 
-  await sendResetUsuarioEmail(ativos[0]);
+  const r = await sendResetUsuarioEmail(ativos[0]);
+  assertMailOk(r);
   return { destino: 'usuario' };
 }
 
