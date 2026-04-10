@@ -88,8 +88,13 @@ async function criarTenant(req, res, next) {
 
     let conviteAdminEnviado = false;
     if (!comSenha) {
-      const r = await sendConviteUsuario(resultado.admin.id);
-      conviteAdminEnviado = Boolean(r.ok && !r.skipped);
+      try {
+        const r = await sendConviteUsuario(resultado.admin.id);
+        conviteAdminEnviado = Boolean(r.ok && !r.skipped);
+      } catch (e) {
+        console.error('[superadmin/criarTenant] Convite falhou (empresa já criada):', e?.message || e);
+        conviteAdminEnviado = false;
+      }
     }
 
     res.status(201).json({
@@ -193,8 +198,13 @@ async function criarAdminTenant(req, res, next) {
 
     let conviteEmailEnviado = false;
     if (!comSenha) {
-      const r = await sendConviteUsuario(usuario.id);
-      conviteEmailEnviado = Boolean(r.ok && !r.skipped);
+      try {
+        const r = await sendConviteUsuario(usuario.id);
+        conviteEmailEnviado = Boolean(r.ok && !r.skipped);
+      } catch (e) {
+        console.error('[superadmin/criarAdmin] Convite falhou (admin já criado):', e?.message || e);
+        conviteEmailEnviado = false;
+      }
     }
 
     res.status(201).json({ ...usuario, conviteEmailEnviado, primeiroAcessoPorEmail: !comSenha });

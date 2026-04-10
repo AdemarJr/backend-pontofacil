@@ -79,13 +79,19 @@ async function criar(req, res, next) {
     let conviteEmailEnviado = false;
     let conviteEmailMotivo = enviarConviteEmail === false ? 'desativado_pelo_admin' : null;
     if (enviarConviteEmail !== false) {
-      const r = await sendConviteUsuario(usuario.id);
-      conviteEmailEnviado = Boolean(r.ok && !r.skipped);
-      if (!conviteEmailEnviado) {
-        if (r.skipped) conviteEmailMotivo = r.reason || 'smtp_nao_configurado';
-        else conviteEmailMotivo = r.reason || 'falha_envio';
-      } else {
-        conviteEmailMotivo = 'enviado';
+      try {
+        const r = await sendConviteUsuario(usuario.id);
+        conviteEmailEnviado = Boolean(r.ok && !r.skipped);
+        if (!conviteEmailEnviado) {
+          if (r.skipped) conviteEmailMotivo = r.reason || 'smtp_nao_configurado';
+          else conviteEmailMotivo = r.reason || 'falha_envio';
+        } else {
+          conviteEmailMotivo = 'enviado';
+        }
+      } catch (e) {
+        console.error('[usuarios/criar] Convite por e-mail falhou (usuário já criado):', e?.message || e);
+        conviteEmailEnviado = false;
+        conviteEmailMotivo = 'falha_envio';
       }
     }
 
@@ -165,6 +171,49 @@ async function remover(req, res, next) {
   } catch (err) { next(err); }
 }
 
+/** Remove o usuário do banco e dados vinculados (registros, escalas, ajustes no tenant). Irreversível. */
+async function excluirDefinitivo(req, res, next) {
+  try {
+    const { id } = req.params;
+    if (!req.tenantId) {
+      return res.status(403).json({ error: 'Exclusão só pode ser feita no contexto da empresa' });
+    }
+    if (id === req.usuario.id) {
+      return res.status(400).json({ error: 'Não é possível excluir o próprio usuário logado' });
+    }
+
+    const alvo = await prisma.usuario.findFirst({
+      where: { id, tenantId: req.tenantId },
+      select: { id: true, role: true },
+    });
+    if (!alvo) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    const tenantId = req.tenantId;
+
+    await prisma.$transaction(async (tx) => {
+      const registros = await tx.registroPonto.findMany({
+        where: { usuarioId: id, tenantId },
+        select: { id: true },
+      });
+      const registroIds = registros.map((r) => r.id);
+      if (registroIds.length > 0) {
+        await tx.ajustePonto.deleteMany({
+          where: { registroId: { in: registroIds } },
+        });
+      }
+      await tx.registroPonto.deleteMany({ where: { usuarioId: id, tenantId } });
+      await tx.escala.deleteMany({ where: { usuarioId: id, tenantId } });
+      await tx.ajustePonto.deleteMany({ where: { adminId: id, tenantId } });
+      const removed = await tx.usuario.deleteMany({ where: { id, tenantId } });
+      if (removed.count === 0) throw new Error('Falha ao excluir usuário');
+    });
+
+    res.json({ sucesso: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function obterPin(req, res, next) {
   try {
     const usuario = await prisma.usuario.findFirst({
@@ -186,4 +235,4 @@ async function obterPin(req, res, next) {
   }
 }
 
-module.exports = { listar, buscarPorId, criar, atualizar, remover, obterPin };
+module.exports = { listar, buscarPorId, criar, atualizar, remover, excluirDefinitivo, obterPin };
