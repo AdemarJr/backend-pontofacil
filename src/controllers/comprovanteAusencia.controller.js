@@ -124,18 +124,21 @@ async function listarMinhas(req, res, next) {
   }
 }
 
-/** Admin: lista comprovantes da empresa */
+/** Admin: lista comprovantes da empresa (sem URL assinada — use GET /:id para abrir arquivo; evita timeout e payload gigante). */
 async function listar(req, res, next) {
   try {
     if (bloquearSuperAdmin(req, res)) return;
     if (req.usuario.role !== 'ADMIN') {
       return res.status(403).json({ error: 'Acesso restrito a administradores' });
     }
+    if (!req.tenantId) {
+      return res.status(403).json({ error: 'Tenant não identificado no token' });
+    }
 
     const status = req.query.status;
     const where = { tenantId: req.tenantId };
-    if (status && ['PENDENTE', 'APROVADO', 'REJEITADO'].includes(status)) {
-      where.status = status;
+    if (status && ['PENDENTE', 'APROVADO', 'REJEITADO'].includes(String(status))) {
+      where.status = String(status);
     }
 
     const lista = await prisma.comprovanteAusencia.findMany({
@@ -150,7 +153,7 @@ async function listar(req, res, next) {
 
     const out = [];
     for (const c of lista) {
-      out.push(await serializar(c, true));
+      out.push(await serializar(c, false));
     }
     res.json(out);
   } catch (err) {
