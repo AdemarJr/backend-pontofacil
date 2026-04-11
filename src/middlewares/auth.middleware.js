@@ -81,4 +81,15 @@ function isolamentoTenant(req, res, next) {
   next();
 }
 
-module.exports = { autenticar, exigirAdmin, exigirSuperAdmin, isolamentoTenant };
+// Apenas colaborador do tenant (não admin nem super admin)
+function exigirColaborador(req, res, next) {
+  if (req.isSuperAdmin) {
+    return res.status(403).json({ error: 'Acesse como colaborador da empresa' });
+  }
+  if (req.usuario.role !== 'COLABORADOR') {
+    return res.status(403).json({ error: 'Acesso restrito a colaboradores' });
+  }
+  next();
+}
+
+module.exports = { autenticar, exigirAdmin, exigirColaborador, exigirSuperAdmin, isolamentoTenant };
