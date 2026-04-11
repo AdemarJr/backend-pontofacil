@@ -188,6 +188,73 @@ app.get('/api/test-smtp-connection', (req, res) => {
     });
 });
 
+// Endpoint simples para diagnosticar conectividade TCP SMTP
+app.get('/api/test-smtp-simple', (req, res) => {
+  const net = require('net');
+  const SMTP_HOST = 'smtp.hostinger.com';
+  const PORTS = [587, 465, 2525];
+  const TIMEOUT_MS = 5000;
+
+  console.log(`[SMTP_SIMPLE] Iniciando teste TCP para ${SMTP_HOST} nas portas ${PORTS.join(', ')}...`);
+
+  function testPort(port) {
+    return new Promise((resolve) => {
+      const socket = net.createConnection({ host: SMTP_HOST, port });
+      let settled = false;
+
+      const finish = (status) => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        resolve({ port, status });
+      };
+
+      const timer = setTimeout(() => {
+        console.log(`[SMTP_SIMPLE] Porta ${port}: TIMEOUT`);
+        finish('TIMEOUT');
+      }, TIMEOUT_MS);
+
+      socket.on('connect', () => {
+        clearTimeout(timer);
+        console.log(`[SMTP_SIMPLE] Porta ${port}: CONNECTED`);
+        finish('CONNECTED');
+      });
+
+      socket.on('error', (err) => {
+        clearTimeout(timer);
+        const status = err.code === 'ECONNREFUSED' ? 'REFUSED' : 'ERROR';
+        console.log(`[SMTP_SIMPLE] Porta ${port}: ${status} — ${err.message}`);
+        finish(status);
+      });
+    });
+  }
+
+  Promise.all(PORTS.map((port) => testPort(port)))
+    .then((results) => {
+      const resultMap = {};
+      results.forEach(({ port, status }) => { resultMap[port] = status; });
+
+      const connectedPorts = results.filter(r => r.status === 'CONNECTED').map(r => r.port);
+      const allFailed = connectedPorts.length === 0;
+
+      const message = allFailed
+        ? 'Se todas derem TIMEOUT, Railway está bloqueando egress SMTP. Contate suporte.'
+        : `Porta ${connectedPorts.join(', ')} conectou! Use essa porta no Nodemailer.`;
+
+      console.log(`[SMTP_SIMPLE] Resultado: ${JSON.stringify(resultMap)} | ${message}`);
+
+      return res.status(200).json({
+        host: SMTP_HOST,
+        results: resultMap,
+        message,
+      });
+    })
+    .catch((err) => {
+      console.error('[SMTP_SIMPLE] Erro inesperado:', err.message);
+      return res.status(500).json({ error: 'Erro ao executar teste SMTP simples.', detail: err.message });
+    });
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
