@@ -135,6 +135,59 @@ app.get('/api/check-ip', (req, res) => {
   });
 });
 
+// Endpoint para testar conectividade TCP com smtp.hostinger.com nas portas SMTP
+app.get('/api/test-smtp-connection', (req, res) => {
+  const net = require('net');
+  const SMTP_HOST = 'smtp.hostinger.com';
+  const PORTS = [587, 465, 2525];
+  const TIMEOUT_MS = 10000;
+
+  function testPort(port) {
+    return new Promise((resolve) => {
+      const socket = net.createConnection({ host: SMTP_HOST, port });
+      let settled = false;
+
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => {
+        console.log(`[SMTP_TEST] Porta ${port}: TIMEOUT após ${TIMEOUT_MS}ms`);
+        finish({ connected: false, message: 'Connection timeout' });
+      }, TIMEOUT_MS);
+
+      socket.on('connect', () => {
+        clearTimeout(timer);
+        console.log(`[SMTP_TEST] Porta ${port}: CONECTADO com sucesso a ${SMTP_HOST}:${port}`);
+        finish({ connected: true, message: 'Conexão bem-sucedida' });
+      });
+
+      socket.on('error', (err) => {
+        clearTimeout(timer);
+        const message = err.code === 'ECONNREFUSED' ? 'Connection refused' : err.message;
+        console.log(`[SMTP_TEST] Porta ${port}: ERRO — ${message} (code: ${err.code || 'N/A'})`);
+        finish({ connected: false, message });
+      });
+    });
+  }
+
+  console.log(`[SMTP_TEST] Iniciando testes TCP para ${SMTP_HOST} nas portas ${PORTS.join(', ')}...`);
+
+  Promise.all(PORTS.map((port) => testPort(port).then((result) => [port, result])))
+    .then((results) => {
+      const tests = Object.fromEntries(results);
+      console.log('[SMTP_TEST] Resultados finais:', JSON.stringify(tests));
+      return res.status(200).json({ host: SMTP_HOST, tests });
+    })
+    .catch((err) => {
+      console.error('[SMTP_TEST] Erro inesperado:', err.message);
+      return res.status(500).json({ error: 'Erro ao executar testes SMTP.', detail: err.message });
+    });
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
