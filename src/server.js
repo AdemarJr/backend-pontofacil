@@ -113,6 +113,28 @@ app.use('/api/escalas', escalaRoutes);
 app.use('/api/locais-registro', localRoutes);
 app.use('/api/super-admin', superAdminRoutes);
 
+// Endpoint para diagnosticar IP de saída (egress IP)
+app.get('/api/check-ip', (req, res) => {
+  const https = require('https');
+  https.get('https://api.ipify.org?format=json', (ipifyRes) => {
+    let data = '';
+    ipifyRes.on('data', (chunk) => { data += chunk; });
+    ipifyRes.on('end', () => {
+      try {
+        const { ip } = JSON.parse(data);
+        console.log(`[EGRESS_IP] IP público de saída do Railway: ${ip}`);
+        return res.status(200).json({ egressIp: ip, message: 'IP de saída registrado nos logs' });
+      } catch (parseErr) {
+        console.error('[EGRESS_IP] Erro ao parsear resposta:', parseErr.message);
+        return res.status(502).json({ error: 'Resposta inválida do serviço de IP.' });
+      }
+    });
+  }).on('error', (err) => {
+    console.error('[EGRESS_IP] Falha ao consultar api.ipify.org:', err.message);
+    return res.status(502).json({ error: 'Não foi possível consultar o IP de saída.', detail: err.message });
+  });
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
