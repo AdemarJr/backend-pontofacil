@@ -186,4 +186,44 @@ async function minha(req, res, next) {
   }
 }
 
-module.exports = { listar, criar, atualizar, remover, minha };
+async function resumo(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+
+    // Última escala ATIVA por colaborador
+    const ultimasAtivas = await prisma.escala.findMany({
+      where: { tenantId, ativo: true },
+      orderBy: { updatedAt: 'desc' },
+      distinct: ['usuarioId'],
+      include: {
+        usuario: { select: { id: true, nome: true, cargo: true, departamento: true, ativo: true, role: true } },
+      },
+    });
+
+    // Só colaborador ativo
+    const lista = ultimasAtivas
+      .filter((e) => e.usuario?.role === 'COLABORADOR' && e.usuario?.ativo !== false)
+      .map((e) => ({
+        usuario: e.usuario,
+        escala: {
+          id: e.id,
+          nome: e.nome,
+          horaInicio: e.horaInicio,
+          horaFim: e.horaFim,
+          diasSemana: e.diasSemana,
+          cargaHorariaDiaria: e.cargaHorariaDiaria,
+          intervaloMinutos: e.intervaloMinutos,
+          horaSaidaAlmoco: e.horaSaidaAlmoco,
+          horaRetornoAlmoco: e.horaRetornoAlmoco,
+          ativo: e.ativo,
+          updatedAt: e.updatedAt,
+        },
+      }));
+
+    res.json({ total: lista.length, escalas: lista });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listar, criar, atualizar, remover, minha, resumo };
