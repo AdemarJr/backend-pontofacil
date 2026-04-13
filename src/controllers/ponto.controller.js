@@ -6,10 +6,18 @@ const crypto = require('crypto');
 
 const prisma = new PrismaClient();
 
+const LIMITE_PENDENCIA_MODAL_HORAS = 12;
+const LIMITE_TURNO_MAX_HORAS = 16;
+
+function diffHoras(a, b) {
+  const ms = Math.abs(new Date(a).getTime() - new Date(b).getTime());
+  return ms / (1000 * 60 * 60);
+}
+
 // Registrar ponto (chamado pelo totem após foto)
 async function registrar(req, res, next) {
   try {
-    const { tipo, latitude, longitude, deviceId, fotoBase64 } = req.body;
+    const { tipo, latitude, longitude, deviceId, fotoBase64, forcarNovoTurno } = req.body;
     const usuarioId = req.usuario.id;
     const tenantId = req.tenantId || req.usuario.tenantId;
 
@@ -106,6 +114,96 @@ async function registrar(req, res, next) {
       origem = 'APP_INDIVIDUAL';
     }
 
+    // ---- PAREAMENTO / ESQUECIMENTO DE SAÍDA ----
+    // Regras:
+    // - Fluxo normal: o tipo deve ser o próximo esperado pela sequência.
+    // - Se o último registro "abre" um ciclo e já se passaram >= 16h, assume saída esquecida:
+    //   marca o último como não validado e força uma nova ENTRADA (gera pendência para ajuste).
+    // - Se o colaborador explicitamente escolher "iniciar novo turno", permitimos ENTRADA mesmo fora da sequência.
+    const ultimo = await prisma.registroPonto.findFirst({
+      where: { tenantId, usuarioId },
+      orderBy: { dataHora: 'desc' },
+      select: { id: true, tipo: true, dataHora: true, validado: true },
+    });
+
+    const proximoEsperado = determinarProximoTipo(ultimo?.tipo);
+    const ultimoAbreCiclo = Boolean(ultimo) && ultimo.tipo !== 'SAIDA';
+    const horasDesdeUltimo = ultimo ? diffHoras(new Date(), ultimo.dataHora) : 0;
+
+    if (ultimoAbreCiclo && horasDesdeUltimo >= LIMITE_TURNO_MAX_HORAS) {
+      // Saída do ciclo anterior provavelmente foi esquecida.
+      // Força nova entrada e abre pendência no registro anterior (não validado).
+      await prisma.registroPonto.update({
+        where: { id: ultimo.id },
+        data: { validado: false },
+      });
+
+      const registro = await prisma.registroPonto.create({
+        data: {
+          tenantId,
+          usuarioId,
+          tipo: 'ENTRADA',
+          latitude: latitude ? parseFloat(latitude) : null,
+          longitude: longitude ? parseFloat(longitude) : null,
+          dentroGeofence,
+          fotoUrl,
+          fotoKey,
+          deviceId,
+          ipHash,
+          userAgent: req.headers['user-agent']?.substring(0, 200),
+          origem,
+        },
+        include: {
+          usuario: { select: { nome: true, cargo: true } },
+        },
+      });
+
+      return res.status(201).json({
+        sucesso: true,
+        aviso: {
+          code: 'PENDENCIA_SAIDA_ESQUECIDA',
+          message:
+            'Detectamos uma marcação anterior em aberto há muito tempo. Iniciamos um novo turno e sinalizamos pendência para ajuste.',
+          pendencia: {
+            registroId: ultimo.id,
+            ultimoTipo: ultimo.tipo,
+            ultimoEm: ultimo.dataHora,
+            horasAberto: Math.round(horasDesdeUltimo * 10) / 10,
+            limiteHoras: LIMITE_TURNO_MAX_HORAS,
+          },
+        },
+        registro: {
+          id: registro.id,
+          tipo: registro.tipo,
+          dataHora: registro.dataHora,
+          usuario: registro.usuario.nome,
+        },
+        proximoTipo: determinarProximoTipo(registro.tipo),
+      });
+    }
+
+    // Se o usuário escolheu "iniciar novo turno", permite ENTRADA fora da sequência
+    if (forcarNovoTurno === true) {
+      if (tipo !== 'ENTRADA') {
+        return res.status(400).json({ error: 'Para iniciar um novo turno, o tipo deve ser ENTRADA.' });
+      }
+      if (ultimoAbreCiclo && ultimo?.id) {
+        await prisma.registroPonto.update({
+          where: { id: ultimo.id },
+          data: { validado: false },
+        });
+      }
+    } else {
+      // Fluxo normal: exige o tipo esperado
+      if (tipo !== proximoEsperado) {
+        return res.status(409).json({
+          error: 'Tipo de ponto inesperado para a sequência atual.',
+          code: 'TIPO_INESPERADO',
+          esperado: proximoEsperado,
+        });
+      }
+    }
+
     // Registra no banco
     const registro = await prisma.registroPonto.create({
       data: {
@@ -134,7 +232,8 @@ async function registrar(req, res, next) {
         tipo: registro.tipo,
         dataHora: registro.dataHora,
         usuario: registro.usuario.nome,
-      }
+      },
+      proximoTipo: determinarProximoTipo(registro.tipo),
     });
   } catch (err) { next(err); }
 }
@@ -216,13 +315,31 @@ async function ultimoPonto(req, res, next) {
     const ultimo = await prisma.registroPonto.findFirst({
       where: { usuarioId, tenantId },
       orderBy: { dataHora: 'desc' },
-      select: { tipo: true, dataHora: true }
+      select: { id: true, tipo: true, dataHora: true, validado: true }
     });
 
     // Determina o próximo tipo esperado
     const proximoTipo = determinarProximoTipo(ultimo?.tipo);
 
-    res.json({ ultimoPonto: ultimo, proximoTipo });
+    // Pendência (check-in antigo): entrada/ciclo aberto há tempo demais
+    const pendenciaCheckin = (() => {
+      if (!ultimo) return { aberta: false };
+      if (ultimo.tipo === 'SAIDA') return { aberta: false };
+      const horas = diffHoras(new Date(), ultimo.dataHora);
+      if (horas < LIMITE_PENDENCIA_MODAL_HORAS) return { aberta: false };
+      return {
+        aberta: true,
+        registroId: ultimo.id,
+        ultimoTipo: ultimo.tipo,
+        ultimoEm: ultimo.dataHora,
+        horasAberto: Math.round(horas * 10) / 10,
+        modalLimiteHoras: LIMITE_PENDENCIA_MODAL_HORAS,
+        maxHorasAntesNovoTurno: LIMITE_TURNO_MAX_HORAS,
+        sugerirNovoTurno: horas >= LIMITE_TURNO_MAX_HORAS,
+      };
+    })();
+
+    res.json({ ultimoPonto: ultimo, proximoTipo, pendenciaCheckin });
   } catch (err) { next(err); }
 }
 
