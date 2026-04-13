@@ -14,6 +14,13 @@ function diffHoras(a, b) {
   return ms / (1000 * 60 * 60);
 }
 
+function inicioFimDoDia(date = new Date()) {
+  const d = new Date(date);
+  const inicio = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+  const fim = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+  return { inicio, fim };
+}
+
 // Registrar ponto (chamado pelo totem após foto)
 async function registrar(req, res, next) {
   try {
@@ -112,6 +119,31 @@ async function registrar(req, res, next) {
         return res.status(403).json({ error: 'Registro pelo app é apenas para colaboradores' });
       }
       origem = 'APP_INDIVIDUAL';
+    }
+
+    // ---- REGRA ANTI-DUPLICIDADE (um tipo por dia) ----
+    // Evita problemas no relatório: não pode ter 2 entradas ou 2 saídas no mesmo dia, etc.
+    // (admin pode corrigir ajustando horário do registro existente)
+    {
+      const { inicio, fim } = inicioFimDoDia(new Date());
+      const jaExiste = await prisma.registroPonto.findFirst({
+        where: {
+          tenantId,
+          usuarioId,
+          tipo,
+          dataHora: { gte: inicio, lte: fim },
+        },
+        select: { id: true, dataHora: true, tipo: true },
+      });
+      if (jaExiste) {
+        return res.status(409).json({
+          error: 'Já existe uma marcação deste tipo para este colaborador hoje.',
+          code: 'DUPLICADO_DIA',
+          registroId: jaExiste.id,
+          tipo: jaExiste.tipo,
+          dataHora: jaExiste.dataHora,
+        });
+      }
     }
 
     // ---- PAREAMENTO / ESQUECIMENTO DE SAÍDA ----

@@ -7,6 +7,7 @@ const {
   bancoHorasResumo,
   resumoDia,
   ajustarPonto,
+  inserirPontoManual,
 } = require('../controllers/relatorio.controller');
 
 router.use(autenticar, exigirAdmin);
@@ -15,5 +16,6 @@ router.get('/espelho/export', espelhoExport); // ?format=csv|xlsx|pdf
 router.get('/banco-horas', bancoHorasResumo);
 router.get('/resumo-dia', resumoDia);
 router.post('/ajuste', ajustarPonto);
+router.post('/inserir', inserirPontoManual);
 
 module.exports = router;

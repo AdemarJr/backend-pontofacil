@@ -474,10 +474,82 @@ async function ajustarPonto(req, res, next) {
   }
 }
 
+async function inserirPontoManual(req, res, next) {
+  try {
+    const { usuarioId, tipo, dataHora, motivo } = req.body;
+    const tenantId = req.tenantId;
+    const adminId = req.usuario.id;
+
+    if (!usuarioId || !tipo || !dataHora || !motivo) {
+      return res.status(400).json({ error: 'usuarioId, tipo, dataHora e motivo são obrigatórios' });
+    }
+
+    const tiposValidos = ['ENTRADA', 'SAIDA_ALMOCO', 'RETORNO_ALMOCO', 'SAIDA'];
+    if (!tiposValidos.includes(String(tipo).toUpperCase())) {
+      return res.status(400).json({ error: 'Tipo de ponto inválido' });
+    }
+
+    const alvo = await prisma.usuario.findFirst({
+      where: { id: usuarioId, tenantId, role: 'COLABORADOR', ativo: true },
+      select: { id: true },
+    });
+    if (!alvo) return res.status(404).json({ error: 'Colaborador não encontrado' });
+
+    const dh = new Date(dataHora);
+    if (Number.isNaN(dh.getTime())) return res.status(400).json({ error: 'dataHora inválida' });
+
+    // Um tipo por dia (mesma regra do registro automático, mas aplicado no dia informado)
+    const inicio = new Date(dh.getFullYear(), dh.getMonth(), dh.getDate(), 0, 0, 0, 0);
+    const fim = new Date(dh.getFullYear(), dh.getMonth(), dh.getDate(), 23, 59, 59, 999);
+    const jaExiste = await prisma.registroPonto.findFirst({
+      where: { tenantId, usuarioId, tipo: String(tipo).toUpperCase(), dataHora: { gte: inicio, lte: fim } },
+      select: { id: true, dataHora: true },
+    });
+    if (jaExiste) {
+      return res.status(409).json({
+        error: 'Já existe uma marcação deste tipo para este colaborador neste dia.',
+        code: 'DUPLICADO_DIA',
+        registroId: jaExiste.id,
+        dataHora: jaExiste.dataHora,
+      });
+    }
+
+    const registro = await prisma.registroPonto.create({
+      data: {
+        tenantId,
+        usuarioId,
+        tipo: String(tipo).toUpperCase(),
+        dataHora: dh,
+        origem: 'ADMIN_MANUAL',
+        validado: true,
+      },
+    });
+
+    // Reaproveita a tabela de ajustes como trilha/auditoria da justificativa,
+    // mesmo quando o registro já nasce com o horário "correto".
+    const ajuste = await prisma.ajustePonto.create({
+      data: {
+        tenantId,
+        registroId: registro.id,
+        adminId,
+        dataHoraOriginal: dh,
+        dataHoraNova: dh,
+        motivo: String(motivo).trim(),
+        aprovado: true,
+      },
+    });
+
+    return res.status(201).json({ sucesso: true, registro, ajuste });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   espelhoPonto,
   espelhoExport,
   bancoHorasResumo,
   resumoDia,
   ajustarPonto,
+  inserirPontoManual,
 };
