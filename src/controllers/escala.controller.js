@@ -4,6 +4,11 @@ const prisma = new PrismaClient();
 
 const DIAS_VALIDOS = [1, 2, 3, 4, 5, 6, 7];
 
+function diaSemanaISO(date = new Date()) {
+  const day = new Date(date).getDay();
+  return day === 0 ? 7 : day; // domingo=7
+}
+
 function validarDiasSemana(arr) {
   if (!Array.isArray(arr) || arr.length === 0) return false;
   return arr.every((d) => Number.isInteger(d) && d >= 1 && d <= 7);
@@ -156,4 +161,29 @@ async function remover(req, res, next) {
   }
 }
 
-module.exports = { listar, criar, atualizar, remover };
+async function minha(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const usuarioId = req.usuario.id;
+
+    const dow = diaSemanaISO(new Date());
+    const escalas = await prisma.escala.findMany({
+      where: { tenantId, usuarioId, ativo: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    // Preferir uma escala aplicável ao dia da semana; fallback: a mais recente ativa
+    const aplicavel = escalas.find((e) => Array.isArray(e.diasSemana) && e.diasSemana.includes(dow)) || escalas[0] || null;
+
+    res.json({
+      escala: aplicavel,
+      obs: aplicavel
+        ? 'Escala ativa (preferindo a aplicável ao dia atual).'
+        : 'Nenhuma escala ativa cadastrada para este colaborador.',
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { listar, criar, atualizar, remover, minha };

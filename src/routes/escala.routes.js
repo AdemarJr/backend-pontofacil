@@ -1,8 +1,14 @@
 const router = require('express').Router();
-const { autenticar, exigirAdmin } = require('../middlewares/auth.middleware');
-const { listar, criar, atualizar, remover } = require('../controllers/escala.controller');
+const { autenticar, exigirAdmin, exigirColaborador } = require('../middlewares/auth.middleware');
+const { listar, criar, atualizar, remover, minha } = require('../controllers/escala.controller');
 
-router.use(autenticar, exigirAdmin);
+router.use(autenticar);
+
+// Colaborador: ver a própria escala (para Meu Ponto)
+router.get('/minha', exigirColaborador, minha);
+
+// Admin: CRUD de escalas
+router.use(exigirAdmin);
 router.get('/', listar);
 router.post('/', criar);
 router.put('/:id', atualizar);
