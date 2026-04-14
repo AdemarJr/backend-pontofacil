@@ -9,9 +9,19 @@ const prisma = new PrismaClient();
 const LIMITE_PENDENCIA_MODAL_HORAS = 12;
 const LIMITE_TURNO_MAX_HORAS = 16;
 
+// Avisos de "registro cedo demais" (não impedem se o usuário confirmar).
+// Mantemos no backend para ficar consistente entre dispositivos.
+const DEFAULT_MIN_TRABALHO_ANTES_SAIDA_MIN = 30; // ENTRADA->SAIDA_ALMOCO/SAIDA ou RETORNO->SAIDA
+const DEFAULT_MIN_INTERVALO_ALMOCO_MIN = 30; // SAIDA_ALMOCO->RETORNO_ALMOCO
+
 function diffHoras(a, b) {
   const ms = Math.abs(new Date(a).getTime() - new Date(b).getTime());
   return ms / (1000 * 60 * 60);
+}
+
+function diffMinutos(a, b) {
+  const ms = Math.abs(new Date(a).getTime() - new Date(b).getTime());
+  return ms / (1000 * 60);
 }
 
 function inicioFimDoDia(date = new Date()) {
@@ -21,10 +31,22 @@ function inicioFimDoDia(date = new Date()) {
   return { inicio, fim };
 }
 
+function isSameLocalDay(a, b) {
+  if (!a || !b) return false;
+  const da = new Date(a);
+  const db = new Date(b);
+  return (
+    da.getFullYear() === db.getFullYear() &&
+    da.getMonth() === db.getMonth() &&
+    da.getDate() === db.getDate()
+  );
+}
+
 // Registrar ponto (chamado pelo totem após foto)
 async function registrar(req, res, next) {
   try {
-    const { tipo, latitude, longitude, deviceId, fotoBase64, forcarNovoTurno } = req.body;
+    const { tipo, latitude, longitude, deviceId, fotoBase64, forcarNovoTurno, confirmarRegistroCurto } =
+      req.body;
     const usuarioId = req.usuario.id;
     const tenantId = req.tenantId || req.usuario.tenantId;
 
@@ -158,9 +180,24 @@ async function registrar(req, res, next) {
       select: { id: true, tipo: true, dataHora: true, validado: true },
     });
 
-    const proximoEsperado = determinarProximoTipo(ultimo?.tipo);
+    const agora = new Date();
+    const ultimoEhHoje = Boolean(ultimo) && isSameLocalDay(ultimo.dataHora, agora);
+    // A sequência que controla o "tipo esperado" deve ser por dia:
+    // - se não há registro hoje, o esperado é ENTRADA (mesmo que ontem tenha ficado "aberto").
+    // - se há registro hoje, segue a sequência normal baseada no último de hoje.
+    const proximoEsperado = ultimoEhHoje ? determinarProximoTipo(ultimo?.tipo) : 'ENTRADA';
     const ultimoAbreCiclo = Boolean(ultimo) && ultimo.tipo !== 'SAIDA';
-    const horasDesdeUltimo = ultimo ? diffHoras(new Date(), ultimo.dataHora) : 0;
+    const horasDesdeUltimo = ultimo ? diffHoras(agora, ultimo.dataHora) : 0;
+
+    // Se virou o dia e ontem ficou "em aberto", permitimos iniciar o dia normalmente (ENTRADA),
+    // mas sinalizamos pendência para o administrativo ajustar o dia anterior.
+    // Observação: a regra anti-duplicidade por tipo/dia (acima) impede 2 ENTRADAS no mesmo dia.
+    if (!forcarNovoTurno && tipo === 'ENTRADA' && !ultimoEhHoje && ultimoAbreCiclo && ultimo?.id) {
+      await prisma.registroPonto.update({
+        where: { id: ultimo.id },
+        data: { validado: false },
+      });
+    }
 
     if (ultimoAbreCiclo && horasDesdeUltimo >= LIMITE_TURNO_MAX_HORAS) {
       // Saída do ciclo anterior provavelmente foi esquecida.
@@ -236,6 +273,61 @@ async function registrar(req, res, next) {
       }
     }
 
+    // ---- AVISO: registro muito cedo (sequencial) ----
+    // Ex.: tentou retornar do almoço com 5 min, ou tentar sair com poucos minutos de trabalho.
+    // O colaborador pode confirmar para prosseguir mesmo assim.
+    if (!forcarNovoTurno && confirmarRegistroCurto !== true) {
+      const minTrabalhoAntesSaidaMin =
+        tenant?.trabalhoMinimoAntesSaidaMinutos ?? DEFAULT_MIN_TRABALHO_ANTES_SAIDA_MIN;
+      const minIntervaloAlmocoMin =
+        tenant?.intervaloMinimoAlmocoMinutos ?? DEFAULT_MIN_INTERVALO_ALMOCO_MIN;
+
+      const { inicio, fim } = inicioFimDoDia(agora);
+      const ultimoHoje = await prisma.registroPonto.findFirst({
+        where: { tenantId, usuarioId, dataHora: { gte: inicio, lte: fim } },
+        orderBy: { dataHora: 'desc' },
+        select: { id: true, tipo: true, dataHora: true },
+      });
+
+      if (ultimoHoje?.id) {
+        const minutos = diffMinutos(agora, ultimoHoje.dataHora);
+
+        // SAIDA_ALMOCO ou SAIDA logo após ENTRADA/RETORNO
+        if (
+          (tipo === 'SAIDA_ALMOCO' || tipo === 'SAIDA') &&
+          (ultimoHoje.tipo === 'ENTRADA' || ultimoHoje.tipo === 'RETORNO_ALMOCO') &&
+          minutos < minTrabalhoAntesSaidaMin
+        ) {
+          return res.status(409).json({
+            error:
+              'Você ainda não completou o tempo mínimo de trabalho para este registro. Se for necessário, confirme para registrar mesmo assim.',
+            code: 'REGISTRO_MUITO_CEDO',
+            regra: 'MIN_TRABALHO',
+            tipoTentado: tipo,
+            ultimoTipo: ultimoHoje.tipo,
+            ultimoEm: ultimoHoje.dataHora,
+            minutosDecorridos: Math.round(minutos),
+            minimoMinutos: minTrabalhoAntesSaidaMin,
+          });
+        }
+
+        // RETORNO_ALMOCO logo após SAIDA_ALMOCO
+        if (tipo === 'RETORNO_ALMOCO' && ultimoHoje.tipo === 'SAIDA_ALMOCO' && minutos < minIntervaloAlmocoMin) {
+          return res.status(409).json({
+            error:
+              'O intervalo ainda não completou o tempo mínimo. Se for necessário, confirme para registrar mesmo assim.',
+            code: 'REGISTRO_MUITO_CEDO',
+            regra: 'MIN_INTERVALO',
+            tipoTentado: tipo,
+            ultimoTipo: ultimoHoje.tipo,
+            ultimoEm: ultimoHoje.dataHora,
+            minutosDecorridos: Math.round(minutos),
+            minimoMinutos: minIntervaloAlmocoMin,
+          });
+        }
+      }
+    }
+
     // Registra no banco
     const registro = await prisma.registroPonto.create({
       data: {
@@ -257,8 +349,24 @@ async function registrar(req, res, next) {
       }
     });
 
+    // Se marcou pendência por virada de dia (ontem em aberto), devolve aviso para o frontend mostrar ao colaborador.
+    const avisoViradaDia =
+      !forcarNovoTurno && tipo === 'ENTRADA' && !ultimoEhHoje && ultimoAbreCiclo && ultimo?.id
+        ? {
+            code: 'PENDENCIA_DIA_ANTERIOR',
+            message:
+              'Detectamos um registro do dia anterior que ficou em aberto. O dia de hoje seguirá normalmente, e o administrativo deve ajustar o dia anterior.',
+            pendencia: {
+              registroId: ultimo.id,
+              ultimoTipo: ultimo.tipo,
+              ultimoEm: ultimo.dataHora,
+            },
+          }
+        : null;
+
     res.status(201).json({
       sucesso: true,
+      ...(avisoViradaDia ? { aviso: avisoViradaDia } : {}),
       registro: {
         id: registro.id,
         tipo: registro.tipo,
@@ -350,14 +458,33 @@ async function ultimoPonto(req, res, next) {
       select: { id: true, tipo: true, dataHora: true, validado: true }
     });
 
-    // Determina o próximo tipo esperado
-    const proximoTipo = determinarProximoTipo(ultimo?.tipo);
+    const agora = new Date();
+    const ultimoEhHoje = Boolean(ultimo) && isSameLocalDay(ultimo.dataHora, agora);
+    // Próximo tipo esperado por dia:
+    // - se não há registro hoje, começa por ENTRADA
+    // - se há registro hoje, segue a sequência baseada no último de hoje
+    const proximoTipo = ultimoEhHoje ? determinarProximoTipo(ultimo?.tipo) : 'ENTRADA';
 
     // Pendência (check-in antigo): entrada/ciclo aberto há tempo demais
     const pendenciaCheckin = (() => {
       if (!ultimo) return { aberta: false };
       if (ultimo.tipo === 'SAIDA') return { aberta: false };
       const horas = diffHoras(new Date(), ultimo.dataHora);
+      // Se virou o dia e ficou aberto, já considera pendência (mesmo com < 12h),
+      // porque o colaborador deve seguir o fluxo do dia atual e o administrativo ajusta o anterior.
+      if (!ultimoEhHoje) {
+        return {
+          aberta: true,
+          registroId: ultimo.id,
+          ultimoTipo: ultimo.tipo,
+          ultimoEm: ultimo.dataHora,
+          horasAberto: Math.round(horas * 10) / 10,
+          modalLimiteHoras: LIMITE_PENDENCIA_MODAL_HORAS,
+          maxHorasAntesNovoTurno: LIMITE_TURNO_MAX_HORAS,
+          sugerirNovoTurno: true,
+          motivo: 'DIA_ANTERIOR_EM_ABERTO',
+        };
+      }
       if (horas < LIMITE_PENDENCIA_MODAL_HORAS) return { aberta: false };
       return {
         aberta: true,

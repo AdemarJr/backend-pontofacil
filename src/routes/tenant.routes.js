@@ -11,7 +11,12 @@ router.get('/meu', autenticar, async (req, res, next) => {
       select: {
         id: true, razaoSocial: true, nomeFantasia: true, cnpj: true,
         plano: true, status: true, geofenceLat: true, geofenceLng: true,
-        geofenceRaio: true, geofenceAtivo: true, fotoObrigatoria: true, toleranciaMinutos: true,
+        geofenceRaio: true,
+        geofenceAtivo: true,
+        fotoObrigatoria: true,
+        toleranciaMinutos: true,
+        trabalhoMinimoAntesSaidaMinutos: true,
+        intervaloMinimoAlmocoMinutos: true,
       }
     });
     res.json(tenant);
@@ -20,7 +25,16 @@ router.get('/meu', autenticar, async (req, res, next) => {
 
 router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
   try {
-    const { geofenceLat, geofenceLng, geofenceRaio, geofenceAtivo, fotoObrigatoria, toleranciaMinutos } = req.body;
+    const {
+      geofenceLat,
+      geofenceLng,
+      geofenceRaio,
+      geofenceAtivo,
+      fotoObrigatoria,
+      toleranciaMinutos,
+      trabalhoMinimoAntesSaidaMinutos,
+      intervaloMinimoAlmocoMinutos,
+    } = req.body;
     await prisma.tenant.update({
       where: { id: req.tenantId },
       data: {
@@ -30,6 +44,12 @@ router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
         ...(geofenceAtivo !== undefined && { geofenceAtivo: Boolean(geofenceAtivo) }),
         ...(fotoObrigatoria !== undefined && { fotoObrigatoria: Boolean(fotoObrigatoria) }),
         ...(toleranciaMinutos !== undefined && { toleranciaMinutos: parseInt(toleranciaMinutos) }),
+        ...(trabalhoMinimoAntesSaidaMinutos !== undefined && {
+          trabalhoMinimoAntesSaidaMinutos: parseInt(trabalhoMinimoAntesSaidaMinutos),
+        }),
+        ...(intervaloMinimoAlmocoMinutos !== undefined && {
+          intervaloMinimoAlmocoMinutos: parseInt(intervaloMinimoAlmocoMinutos),
+        }),
       }
     });
     res.json({ sucesso: true });

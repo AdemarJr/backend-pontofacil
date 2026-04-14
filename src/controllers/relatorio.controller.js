@@ -17,6 +17,24 @@ function fmtDateISO(d) {
   return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
 }
 
+function whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }) {
+  // Importante: relatórios devem respeitar o horário efetivo (ajuste.dataHoraNova quando existir).
+  // Sem isso, o admin "ajusta" mas o espelho continua filtrando pelo dataHora original e parece que não salvou.
+  return {
+    tenantId,
+    ...(usuarioId && { usuarioId }),
+    OR: [
+      {
+        ajuste: { is: null },
+        dataHora: { gte: dataInicio, lte: dataFim },
+      },
+      {
+        ajuste: { is: { dataHoraNova: { gte: dataInicio, lte: dataFim } } },
+      },
+    ],
+  };
+}
+
 /**
  * Agrupa registros por usuário/dia e aplica escalas + tolerância do tenant.
  */
@@ -137,11 +155,7 @@ async function espelhoPonto(req, res, next) {
     const dataFim = new Date(anoNum, mesNum, 0, 23, 59, 59);
 
     const registros = await prisma.registroPonto.findMany({
-      where: {
-        tenantId,
-        ...(usuarioId && { usuarioId }),
-        dataHora: { gte: dataInicio, lte: dataFim },
-      },
+      where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
       include: {
         usuario: { select: { nome: true, cargo: true, departamento: true } },
         ajuste: true,
@@ -245,11 +259,7 @@ async function espelhoExport(req, res, next) {
     const dataFim = new Date(anoNum, mesNum, 0, 23, 59, 59);
 
     const registros = await prisma.registroPonto.findMany({
-      where: {
-        tenantId,
-        ...(usuarioId && { usuarioId }),
-        dataHora: { gte: dataInicio, lte: dataFim },
-      },
+      where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
       include: {
         usuario: { select: { nome: true, cargo: true, departamento: true } },
         ajuste: true,
@@ -369,11 +379,7 @@ async function bancoHorasResumo(req, res, next) {
     const dataFim = new Date(anoNum, mesNum, 0, 23, 59, 59);
 
     const registros = await prisma.registroPonto.findMany({
-      where: {
-        tenantId,
-        ...(usuarioId && { usuarioId }),
-        dataHora: { gte: dataInicio, lte: dataFim },
-      },
+      where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
       include: {
         usuario: { select: { nome: true, cargo: true, departamento: true } },
         ajuste: true,
