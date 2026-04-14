@@ -45,6 +45,7 @@ model Tenant {
   registros      RegistroPonto[]
   escalas        Escala[]
   ajustes        AjustePonto[]
+  solicitacoesAjustePonto SolicitacaoAjustePonto[]
   locaisRegistro LocalRegistro[]
   comprovantesAusencia ComprovanteAusencia[]
 
@@ -113,6 +114,8 @@ model Usuario {
   registros   RegistroPonto[]
   escalas     Escala[]
   ajustesFeitos AjustePonto[] @relation("AdminAjuste")
+  solicitacoesAjustePonto SolicitacaoAjustePonto[]
+  solicitacoesAjusteRespondidas SolicitacaoAjustePonto[] @relation("SolicitacaoRespondidaAdmin")
   comprovantesAusencia ComprovanteAusencia[]
   comprovantesRespondidos ComprovanteAusencia[] @relation("ComprovanteRespostaAdmin")
 
@@ -177,6 +180,42 @@ enum OrigemPonto {
   TOTEM
   APP_INDIVIDUAL
   ADMIN_MANUAL
+}
+
+enum StatusSolicitacaoAjustePonto {
+  PENDENTE
+  ATENDIDA
+  REJEITADA
+}
+
+// ---- SOLICITAÇÕES DE AJUSTE (COLABORADOR -> ADMIN/RH) ----
+model SolicitacaoAjustePonto {
+  id             String   @id @default(uuid())
+  tenantId       String
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usuarioId      String
+  usuario        Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  /// Dia de referência da pendência (YYYY-MM-DD)
+  dia            String
+  /// Tipo faltante ou que precisa correção
+  tipo           TipoPonto
+  /// Sugestão do colaborador (opcional)
+  dataHoraSugerida DateTime?
+  justificativa  String
+
+  status         StatusSolicitacaoAjustePonto @default(PENDENTE)
+  respondidoPorId String?
+  respondidoPor   Usuario? @relation("SolicitacaoRespondidaAdmin", fields: [respondidoPorId], references: [id], onDelete: SetNull)
+  respondidoEm    DateTime?
+  respostaAdmin   String?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([tenantId, usuarioId, dia])
+  @@index([tenantId, status])
+  @@map("solicitacoes_ajuste_ponto")
 }
 
 // ---- ESCALAS DE TRABALHO ----

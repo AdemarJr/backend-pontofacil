@@ -2,6 +2,7 @@
 const { PrismaClient } = require('@prisma/client');
 const { uploadFoto, gerarUrlAssinada } = require('../services/s3.service');
 const { validarGeofence, validarEmAlgumLocal } = require('../utils/geofence');
+const { calcularDia, pad2 } = require('../utils/espelhoCalculo');
 const crypto = require('crypto');
 
 const prisma = new PrismaClient();
@@ -31,6 +32,11 @@ function inicioFimDoDia(date = new Date()) {
   return { inicio, fim };
 }
 
+function fmtDiaISO(d) {
+  const dt = new Date(d);
+  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+}
+
 function isSameLocalDay(a, b) {
   if (!a || !b) return false;
   const da = new Date(a);
@@ -40,6 +46,112 @@ function isSameLocalDay(a, b) {
     da.getMonth() === db.getMonth() &&
     da.getDate() === db.getDate()
   );
+}
+
+async function pendenciasColaborador(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const usuarioId = req.usuario.id;
+    const dias = Math.min(60, Math.max(1, parseInt(req.query.dias || '14', 10)));
+
+    const agora = new Date();
+    const inicioJanela = new Date(agora);
+    inicioJanela.setDate(inicioJanela.getDate() - dias + 1);
+    inicioJanela.setHours(0, 0, 0, 0);
+
+    const registros = await prisma.registroPonto.findMany({
+      where: { tenantId, usuarioId, dataHora: { gte: inicioJanela, lte: agora } },
+      include: { ajuste: true },
+      orderBy: { dataHora: 'asc' },
+    });
+
+    const porDia = new Map();
+    for (const r of registros) {
+      const efetivo = r.ajuste?.dataHoraNova || r.dataHora;
+      const dia = fmtDiaISO(efetivo);
+      if (!porDia.has(dia)) porDia.set(dia, []);
+      porDia.get(dia).push({ id: r.id, tipo: r.tipo, dataHora: efetivo });
+    }
+
+    const pendencias = [];
+    for (const [dia, pontos] of porDia.entries()) {
+      const calc = calcularDia(pontos, { dataRef: dia });
+      if (!calc.flags?.faltandoMarcacao) continue;
+
+      const missing = [];
+      if (!calc.entrada) missing.push('ENTRADA');
+      if (!calc.saida) missing.push('SAIDA');
+      const temSaidaAlmoco = Boolean(calc.saidaAlmoco);
+      const temRetorno = Boolean(calc.retornoAlmoco);
+      if (temSaidaAlmoco !== temRetorno) {
+        if (!temSaidaAlmoco) missing.push('SAIDA_ALMOCO');
+        if (!temRetorno) missing.push('RETORNO_ALMOCO');
+      }
+
+      pendencias.push({
+        dia,
+        faltando: missing,
+        minutosTrabalhados: calc.minutosTrabalhados,
+        marcacoes: {
+          entrada: calc.entrada,
+          saidaAlmoco: calc.saidaAlmoco,
+          retornoAlmoco: calc.retornoAlmoco,
+          saida: calc.saida,
+        },
+      });
+    }
+
+    pendencias.sort((a, b) => (a.dia < b.dia ? 1 : -1));
+    res.json({ dias, pendencias });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function solicitarAjusteColaborador(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const usuarioId = req.usuario.id;
+    const { dia, tipo, dataHoraSugerida, justificativa } = req.body || {};
+
+    if (!dia || !tipo || !justificativa) {
+      return res.status(400).json({ error: 'dia, tipo e justificativa são obrigatórios' });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dia))) {
+      return res.status(400).json({ error: 'dia inválido (use YYYY-MM-DD)' });
+    }
+    const tiposValidos = ['ENTRADA', 'SAIDA_ALMOCO', 'RETORNO_ALMOCO', 'SAIDA'];
+    const tipoUp = String(tipo).toUpperCase();
+    if (!tiposValidos.includes(tipoUp)) {
+      return res.status(400).json({ error: 'Tipo inválido' });
+    }
+    const just = String(justificativa || '').trim();
+    if (!just) return res.status(400).json({ error: 'Justificativa obrigatória' });
+
+    let dhSug = null;
+    if (dataHoraSugerida) {
+      const dt = new Date(dataHoraSugerida);
+      if (Number.isNaN(dt.getTime())) {
+        return res.status(400).json({ error: 'dataHoraSugerida inválida' });
+      }
+      dhSug = dt;
+    }
+
+    const sol = await prisma.solicitacaoAjustePonto.create({
+      data: {
+        tenantId,
+        usuarioId,
+        dia: String(dia),
+        tipo: tipoUp,
+        dataHoraSugerida: dhSug,
+        justificativa: just,
+      },
+    });
+
+    return res.status(201).json({ sucesso: true, solicitacao: sol });
+  } catch (err) {
+    next(err);
+  }
 }
 
 // Registrar ponto (chamado pelo totem após foto)
@@ -514,4 +626,10 @@ function determinarProximoTipo(ultimoTipo) {
   return sequencia[ultimoTipo] || 'ENTRADA';
 }
 
-module.exports = { registrar, listar, ultimoPonto };
+module.exports = {
+  registrar,
+  listar,
+  ultimoPonto,
+  pendenciasColaborador,
+  solicitarAjusteColaborador,
+};
