@@ -27,11 +27,11 @@
     "multer-s3": "^3.0.1",
     "nodemailer": "^6.10.1",
     "pdfkit": "^0.18.0",
+    "prisma": "^7.7.0",
     "uuid": "^10.0.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "nodemon": "^3.1.4",
-    "prisma": "^7.7.0"
+    "nodemon": "^3.1.4"
   }
 }
