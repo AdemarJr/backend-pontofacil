@@ -157,7 +157,7 @@ async function espelhoPonto(req, res, next) {
     const registros = await prisma.registroPonto.findMany({
       where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
       include: {
-        usuario: { select: { nome: true, cargo: true, departamento: true } },
+        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
         ajuste: true,
       },
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
@@ -261,7 +261,7 @@ async function espelhoExport(req, res, next) {
     const registros = await prisma.registroPonto.findMany({
       where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
       include: {
-        usuario: { select: { nome: true, cargo: true, departamento: true } },
+        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
         ajuste: true,
       },
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
@@ -381,7 +381,7 @@ async function bancoHorasResumo(req, res, next) {
     const registros = await prisma.registroPonto.findMany({
       where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
       include: {
-        usuario: { select: { nome: true, cargo: true, departamento: true } },
+        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
         ajuste: true,
       },
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],

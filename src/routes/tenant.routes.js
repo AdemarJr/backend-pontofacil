@@ -4,6 +4,13 @@ const { PrismaClient } = require('@prisma/client');
 const { autenticar, exigirAdmin } = require('../middlewares/auth.middleware');
 const prisma = new PrismaClient();
 
+function isOutdatedSchemaError(err) {
+  // Prisma: P2022 = column does not exist
+  if (err?.code === 'P2022') return true;
+  const msg = String(err?.message || '');
+  return msg.includes('does not exist') && msg.includes('column');
+}
+
 router.get('/meu', autenticar, async (req, res, next) => {
   try {
     const tenant = await prisma.tenant.findUnique({
@@ -20,7 +27,16 @@ router.get('/meu', autenticar, async (req, res, next) => {
       }
     });
     res.json(tenant);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (isOutdatedSchemaError(err)) {
+      return res.status(500).json({
+        error:
+          'Banco de dados desatualizado para este backend. Aplique as migrations do Prisma (migrate deploy) e tente novamente.',
+        code: 'DB_SCHEMA_OUTDATED',
+      });
+    }
+    next(err);
+  }
 });
 
 router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
@@ -53,7 +69,16 @@ router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
       }
     });
     res.json({ sucesso: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (isOutdatedSchemaError(err)) {
+      return res.status(500).json({
+        error:
+          'Banco de dados desatualizado para este backend. Aplique as migrations do Prisma (migrate deploy) e tente novamente.',
+        code: 'DB_SCHEMA_OUTDATED',
+      });
+    }
+    next(err);
+  }
 });
 
 router.get('/:tenantId/info', async (req, res, next) => {
