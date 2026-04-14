@@ -9,6 +9,9 @@ generator client {
 
 datasource db {
   provider  = "postgresql"
+  // Runtime (ex.: pooler Supabase :6543 + ?pgbouncer=true). Migrações usam directUrl.
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 // ---- EMPRESAS (TENANTS) ----

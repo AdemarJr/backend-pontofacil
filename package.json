@@ -14,7 +14,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
     "@aws-sdk/s3-request-presigner": "^3.600.0",
-    "@prisma/client": "^7.7.0",
+    "@prisma/client": "^6.19.3",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -27,7 +27,7 @@
     "multer-s3": "^3.0.1",
     "nodemailer": "^6.10.1",
     "pdfkit": "^0.18.0",
-    "prisma": "^7.7.0",
+    "prisma": "^6.19.3",
     "uuid": "^10.0.0",
     "zod": "^3.23.8"
   },
