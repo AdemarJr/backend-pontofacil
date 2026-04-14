@@ -119,6 +119,8 @@ model Usuario {
   comprovantesAusencia ComprovanteAusencia[]
   comprovantesRespondidos ComprovanteAusencia[] @relation("ComprovanteRespostaAdmin")
 
+  registrosExcluidos RegistroPonto[] @relation("RegistroPontoExcluidoPor")
+
   @@unique([tenantId, email])
   @@index([tenantId])
   @@index([passwordResetToken])
@@ -163,6 +165,12 @@ model RegistroPonto {
   createdAt   DateTime @default(now())
 
   ajuste      AjustePonto?
+
+  // Exclusão (soft-delete) com auditoria
+  deletedAt     DateTime?
+  deletedById   String?
+  deletedBy     Usuario? @relation("RegistroPontoExcluidoPor", fields: [deletedById], references: [id], onDelete: SetNull)
+  deletedMotivo String?
 
   @@index([tenantId, usuarioId])
   @@index([tenantId, dataHora])

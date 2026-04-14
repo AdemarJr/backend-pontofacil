@@ -7,6 +7,7 @@ const {
   ultimoPonto,
   pendenciasColaborador,
   solicitarAjusteColaborador,
+  excluirRegistroAdmin,
 } = require('../controllers/ponto.controller');
 
 router.post('/registrar', autenticar, registrar);
@@ -14,5 +15,6 @@ router.get('/', autenticar, exigirAdmin, listar);
 router.get('/ultimo/:usuarioId', autenticar, ultimoPonto);
 router.get('/pendencias', autenticar, exigirColaborador, pendenciasColaborador);
 router.post('/solicitacoes-ajuste', autenticar, exigirColaborador, solicitarAjusteColaborador);
+router.delete('/:registroId', autenticar, exigirAdmin, excluirRegistroAdmin);
 
 module.exports = router;

@@ -60,7 +60,7 @@ async function pendenciasColaborador(req, res, next) {
     inicioJanela.setHours(0, 0, 0, 0);
 
     const registros = await prisma.registroPonto.findMany({
-      where: { tenantId, usuarioId, dataHora: { gte: inicioJanela, lte: agora } },
+      where: { tenantId, usuarioId, deletedAt: null, dataHora: { gte: inicioJanela, lte: agora } },
       include: { ajuste: true },
       orderBy: { dataHora: 'asc' },
     });
@@ -149,6 +149,39 @@ async function solicitarAjusteColaborador(req, res, next) {
     });
 
     return res.status(201).json({ sucesso: true, solicitacao: sol });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function excluirRegistroAdmin(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const adminId = req.usuario.id;
+    const { registroId } = req.params;
+    const { motivo } = req.body || {};
+
+    const m = String(motivo || '').trim();
+    if (!m) return res.status(400).json({ error: 'Motivo é obrigatório' });
+
+    const reg = await prisma.registroPonto.findFirst({
+      where: { id: registroId, tenantId },
+      select: { id: true, deletedAt: true },
+    });
+    if (!reg) return res.status(404).json({ error: 'Registro não encontrado' });
+    if (reg.deletedAt) return res.json({ sucesso: true, jaExcluido: true });
+
+    await prisma.registroPonto.update({
+      where: { id: registroId },
+      data: {
+        deletedAt: new Date(),
+        deletedById: adminId,
+        deletedMotivo: m,
+        validado: false,
+      },
+    });
+
+    return res.json({ sucesso: true });
   } catch (err) {
     next(err);
   }
@@ -264,6 +297,7 @@ async function registrar(req, res, next) {
         where: {
           tenantId,
           usuarioId,
+          deletedAt: null,
           tipo,
           dataHora: { gte: inicio, lte: fim },
         },
@@ -287,7 +321,7 @@ async function registrar(req, res, next) {
     //   marca o último como não validado e força uma nova ENTRADA (gera pendência para ajuste).
     // - Se o colaborador explicitamente escolher "iniciar novo turno", permitimos ENTRADA mesmo fora da sequência.
     const ultimo = await prisma.registroPonto.findFirst({
-      where: { tenantId, usuarioId },
+      where: { tenantId, usuarioId, deletedAt: null },
       orderBy: { dataHora: 'desc' },
       select: { id: true, tipo: true, dataHora: true, validado: true },
     });
@@ -396,7 +430,7 @@ async function registrar(req, res, next) {
 
       const { inicio, fim } = inicioFimDoDia(agora);
       const ultimoHoje = await prisma.registroPonto.findFirst({
-        where: { tenantId, usuarioId, dataHora: { gte: inicio, lte: fim } },
+        where: { tenantId, usuarioId, deletedAt: null, dataHora: { gte: inicio, lte: fim } },
         orderBy: { dataHora: 'desc' },
         select: { id: true, tipo: true, dataHora: true },
       });
@@ -498,6 +532,7 @@ async function listar(req, res, next) {
 
     const where = {
       tenantId,
+      deletedAt: null,
       ...(usuarioId && { usuarioId }),
       ...(dataInicio && dataFim && {
         dataHora: {
@@ -565,7 +600,7 @@ async function ultimoPonto(req, res, next) {
     }
 
     const ultimo = await prisma.registroPonto.findFirst({
-      where: { usuarioId, tenantId },
+      where: { usuarioId, tenantId, deletedAt: null },
       orderBy: { dataHora: 'desc' },
       select: { id: true, tipo: true, dataHora: true, validado: true }
     });
@@ -632,4 +667,5 @@ module.exports = {
   ultimoPonto,
   pendenciasColaborador,
   solicitarAjusteColaborador,
+  excluirRegistroAdmin,
 };

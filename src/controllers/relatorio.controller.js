@@ -22,6 +22,7 @@ function whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }) {
   // Sem isso, o admin "ajusta" mas o espelho continua filtrando pelo dataHora original e parece que não salvou.
   return {
     tenantId,
+    deletedAt: null,
     ...(usuarioId && { usuarioId }),
     OR: [
       {
