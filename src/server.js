@@ -265,6 +265,19 @@ app.get('/health', (req, res) => {
 // Handler de erros global
 app.use((err, req, res, next) => {
   console.error('Erro:', err.message);
+  // Prisma: schema desatualizado (coluna não existe) costuma gerar erro em runtime após deploy sem migrate.
+  const msg = String(err?.message || '');
+  const prismaCode = err?.code;
+  const schemaOutdated =
+    prismaCode === 'P2022' ||
+    (msg.toLowerCase().includes('column') && msg.toLowerCase().includes('does not exist'));
+  if (schemaOutdated) {
+    return res.status(500).json({
+      error:
+        'Banco de dados desatualizado para este backend. Rode `npx prisma migrate deploy` no Railway e tente novamente.',
+      code: 'DB_SCHEMA_OUTDATED',
+    });
+  }
   const status = err.status || 500;
   res.status(status).json({
     error: err.message || 'Erro interno do servidor',
