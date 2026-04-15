@@ -8,6 +8,8 @@ const {
   resumoDia,
   ajustarPonto,
   inserirPontoManual,
+  listarSolicitacoesAjuste,
+  decidirSolicitacaoAjuste,
 } = require('../controllers/relatorio.controller');
 
 router.use(autenticar, exigirAdmin);
@@ -17,5 +19,7 @@ router.get('/banco-horas', bancoHorasResumo);
 router.get('/resumo-dia', resumoDia);
 router.post('/ajuste', ajustarPonto);
 router.post('/inserir', inserirPontoManual);
+router.get('/solicitacoes-ajuste', listarSolicitacoesAjuste);
+router.post('/solicitacoes-ajuste/:id/decidir', decidirSolicitacaoAjuste);
 
 module.exports = router;

@@ -552,6 +552,141 @@ async function inserirPontoManual(req, res, next) {
   }
 }
 
+async function listarSolicitacoesAjuste(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const status = String(req.query.status || 'PENDENTE').toUpperCase();
+    const take = Math.min(200, Math.max(1, parseInt(req.query.limite || '50', 10)));
+
+    const where = {
+      tenantId,
+      ...(status ? { status } : {}),
+    };
+
+    const solicitacoes = await prisma.solicitacaoAjustePonto.findMany({
+      where,
+      include: {
+        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
+        respondidoPor: { select: { id: true, nome: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+    });
+
+    res.json({ solicitacoes });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function decidirSolicitacaoAjuste(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const adminId = req.usuario.id;
+    const { id } = req.params;
+    const { acao, respostaAdmin, dataHoraEfetiva } = req.body || {};
+
+    const sol = await prisma.solicitacaoAjustePonto.findFirst({
+      where: { id, tenantId },
+    });
+    if (!sol) return res.status(404).json({ error: 'Solicitação não encontrada' });
+    if (sol.status !== 'PENDENTE') {
+      return res.status(409).json({ error: 'Solicitação já foi decidida' });
+    }
+
+    const a = String(acao || '').toUpperCase();
+    if (a !== 'APROVAR' && a !== 'REJEITAR') {
+      return res.status(400).json({ error: 'acao deve ser APROVAR ou REJEITAR' });
+    }
+
+    if (a === 'REJEITAR') {
+      const upd = await prisma.solicitacaoAjustePonto.update({
+        where: { id },
+        data: {
+          status: 'REJEITADA',
+          respondidoPorId: adminId,
+          respondidoEm: new Date(),
+          respostaAdmin: respostaAdmin ? String(respostaAdmin).trim() : null,
+        },
+      });
+      return res.json({ sucesso: true, solicitacao: upd });
+    }
+
+    // APROVAR: inserir a batida faltante (ADMIN_MANUAL) com motivo contendo a justificativa do colaborador
+    const dh =
+      dataHoraEfetiva != null
+        ? new Date(dataHoraEfetiva)
+        : sol.dataHoraSugerida
+          ? new Date(sol.dataHoraSugerida)
+          : null;
+    if (!dh || Number.isNaN(dh.getTime())) {
+      return res.status(400).json({ error: 'Informe dataHoraEfetiva (ou o colaborador precisa sugerir um horário)' });
+    }
+
+    // regra: um tipo por dia (considera dia da dataHoraEfetiva)
+    const inicio = new Date(dh.getFullYear(), dh.getMonth(), dh.getDate(), 0, 0, 0, 0);
+    const fim = new Date(dh.getFullYear(), dh.getMonth(), dh.getDate(), 23, 59, 59, 999);
+    const jaExiste = await prisma.registroPonto.findFirst({
+      where: {
+        tenantId,
+        usuarioId: sol.usuarioId,
+        tipo: sol.tipo,
+        deletedAt: null,
+        dataHora: { gte: inicio, lte: fim },
+      },
+      select: { id: true, dataHora: true },
+    });
+    if (jaExiste) {
+      return res.status(409).json({
+        error: 'Já existe uma batida desse tipo nesse dia. Use Ajustar em vez de Aprovar esta solicitação.',
+        code: 'DUPLICADO_DIA',
+        registroId: jaExiste.id,
+        dataHora: jaExiste.dataHora,
+      });
+    }
+
+    const motivoBase = `[Solicitação colaborador] ${sol.justificativa}`;
+    const motivoFinal = respostaAdmin ? `${motivoBase}\n[Resposta admin] ${String(respostaAdmin).trim()}` : motivoBase;
+
+    const registro = await prisma.registroPonto.create({
+      data: {
+        tenantId,
+        usuarioId: sol.usuarioId,
+        tipo: sol.tipo,
+        dataHora: dh,
+        origem: 'ADMIN_MANUAL',
+        validado: true,
+      },
+    });
+
+    const ajuste = await prisma.ajustePonto.create({
+      data: {
+        tenantId,
+        registroId: registro.id,
+        adminId,
+        dataHoraOriginal: dh,
+        dataHoraNova: dh,
+        motivo: motivoFinal,
+        aprovado: true,
+      },
+    });
+
+    const upd = await prisma.solicitacaoAjustePonto.update({
+      where: { id },
+      data: {
+        status: 'ATENDIDA',
+        respondidoPorId: adminId,
+        respondidoEm: new Date(),
+        respostaAdmin: respostaAdmin ? String(respostaAdmin).trim() : null,
+      },
+    });
+
+    return res.json({ sucesso: true, solicitacao: upd, registro, ajuste });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   espelhoPonto,
   espelhoExport,
@@ -559,4 +694,6 @@ module.exports = {
   resumoDia,
   ajustarPonto,
   inserirPontoManual,
+  listarSolicitacoesAjuste,
+  decidirSolicitacaoAjuste,
 };
