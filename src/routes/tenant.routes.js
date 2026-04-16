@@ -21,6 +21,8 @@ router.get('/meu', autenticar, async (req, res, next) => {
         geofenceRaio: true,
         geofenceAtivo: true,
         fotoObrigatoria: true,
+        permitirTotem: true,
+        permitirMeuPonto: true,
         toleranciaMinutos: true,
         trabalhoMinimoAntesSaidaMinutos: true,
         intervaloMinimoAlmocoMinutos: true,
@@ -42,6 +44,8 @@ router.get('/meu', autenticar, async (req, res, next) => {
 router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
   try {
     const {
+      permitirTotem,
+      permitirMeuPonto,
       geofenceLat,
       geofenceLng,
       geofenceRaio,
@@ -54,6 +58,8 @@ router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
     await prisma.tenant.update({
       where: { id: req.tenantId },
       data: {
+        ...(permitirTotem !== undefined && { permitirTotem: Boolean(permitirTotem) }),
+        ...(permitirMeuPonto !== undefined && { permitirMeuPonto: Boolean(permitirMeuPonto) }),
         ...(geofenceLat !== undefined && { geofenceLat: parseFloat(geofenceLat) }),
         ...(geofenceLng !== undefined && { geofenceLng: parseFloat(geofenceLng) }),
         ...(geofenceRaio !== undefined && { geofenceRaio: parseInt(geofenceRaio) }),
@@ -85,7 +91,14 @@ router.get('/:tenantId/info', async (req, res, next) => {
   try {
     const tenant = await prisma.tenant.findUnique({
       where: { id: req.params.tenantId, status: 'ATIVO' },
-      select: { id: true, nomeFantasia: true, fotoObrigatoria: true, geofenceAtivo: true }
+      select: {
+        id: true,
+        nomeFantasia: true,
+        fotoObrigatoria: true,
+        geofenceAtivo: true,
+        permitirTotem: true,
+        permitirMeuPonto: true,
+      }
     });
     if (!tenant) return res.status(404).json({ error: 'Empresa não encontrada' });
     res.json(tenant);

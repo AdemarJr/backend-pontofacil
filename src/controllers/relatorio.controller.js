@@ -46,6 +46,13 @@ async function montarPorUsuarioEspelho(registros, tenantId) {
   });
   const tol = tenant?.toleranciaMinutos ?? 5;
 
+  function origemDoTipoEm(pontos, tipo, dt) {
+    if (!dt) return '';
+    const t = new Date(dt).getTime();
+    const achado = pontos.find((p) => p.tipo === tipo && new Date(p.dataHora).getTime() === t);
+    return achado?.origem || '';
+  }
+
   const uids = [...new Set(registros.map((r) => r.usuarioId))];
   const escalasAll = await prisma.escala.findMany({
     where: { tenantId, usuarioId: { in: uids }, ativo: true },
@@ -82,6 +89,7 @@ async function montarPorUsuarioEspelho(registros, tenantId) {
       tipo: r.tipo,
       dataHora: r.ajuste ? r.ajuste.dataHoraNova : r.dataHora,
       fotoUrl: r.fotoUrl,
+      origem: r.origem,
       ajustado: !!r.ajuste,
       motivoAjuste: r.ajuste?.motivo,
     });
@@ -119,6 +127,12 @@ async function montarPorUsuarioEspelho(registros, tenantId) {
           saidaAlmoco: fmtTime(calc.saidaAlmoco),
           retornoAlmoco: fmtTime(calc.retornoAlmoco),
           saida: fmtTime(calc.saida),
+        },
+        origens: {
+          entrada: origemDoTipoEm(pontos, 'ENTRADA', calc.entrada),
+          saidaAlmoco: origemDoTipoEm(pontos, 'SAIDA_ALMOCO', calc.saidaAlmoco),
+          retornoAlmoco: origemDoTipoEm(pontos, 'RETORNO_ALMOCO', calc.retornoAlmoco),
+          saida: origemDoTipoEm(pontos, 'SAIDA', calc.saida),
         },
         flags: calc.flags,
         esperado: calc.esperado,
@@ -183,6 +197,7 @@ function buildEspelhoRows(relatorio, periodo) {
       const d = dias[dia];
       const f = d.flags || {};
       const esp = d.esperado || null;
+      const o = d.origens || {};
       rows.push({
         periodo: `${pad2(periodo.mes)}/${periodo.ano}`,
         dia,
@@ -190,9 +205,13 @@ function buildEspelhoRows(relatorio, periodo) {
         cargo: item.usuario?.cargo ?? '',
         departamento: item.usuario?.departamento ?? '',
         entrada: d.marcacoes?.entrada ?? '',
+        origemEntrada: o.entrada ?? '',
         saidaAlmoco: d.marcacoes?.saidaAlmoco ?? '',
+        origemSaidaAlmoco: o.saidaAlmoco ?? '',
         retornoAlmoco: d.marcacoes?.retornoAlmoco ?? '',
+        origemRetornoAlmoco: o.retornoAlmoco ?? '',
         saida: d.marcacoes?.saida ?? '',
+        origemSaida: o.saida ?? '',
         entradaEsperada: esp?.entrada ?? '',
         saidaEsperada: esp?.saida ?? '',
         cargaHorariaPrevista: esp?.cargaHorariaDiaria != null ? String(esp.cargaHorariaDiaria) : '',
@@ -220,9 +239,13 @@ function rowsToCsv(rows) {
     'cargo',
     'departamento',
     'entrada',
+    'origemEntrada',
     'saidaAlmoco',
+    'origemSaidaAlmoco',
     'retornoAlmoco',
+    'origemRetornoAlmoco',
     'saida',
+    'origemSaida',
     'entradaEsperada',
     'saidaEsperada',
     'cargaHorariaPrevista',
@@ -286,9 +309,13 @@ async function espelhoExport(req, res, next) {
         { header: 'Cargo', key: 'cargo', width: 16 },
         { header: 'Departamento', key: 'departamento', width: 18 },
         { header: 'Entrada', key: 'entrada', width: 10 },
+        { header: 'Origem (Entrada)', key: 'origemEntrada', width: 16 },
         { header: 'Saída Almoço', key: 'saidaAlmoco', width: 12 },
+        { header: 'Origem (Saída Almoço)', key: 'origemSaidaAlmoco', width: 20 },
         { header: 'Retorno Almoço', key: 'retornoAlmoco', width: 13 },
+        { header: 'Origem (Retorno)', key: 'origemRetornoAlmoco', width: 18 },
         { header: 'Saída', key: 'saida', width: 10 },
+        { header: 'Origem (Saída)', key: 'origemSaida', width: 16 },
         { header: 'Entrada esperada (escala)', key: 'entradaEsperada', width: 16 },
         { header: 'Saída esperada (escala)', key: 'saidaEsperada', width: 16 },
         { header: 'Carga prevista (h)', key: 'cargaHorariaPrevista', width: 12 },

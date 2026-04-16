@@ -25,6 +25,10 @@ model Tenant {
   plano          Plano    @default(BASICO)
   status         StatusTenant @default(ATIVO)
 
+  // Canais de registro (por empresa)
+  permitirTotem    Boolean @default(true)
+  permitirMeuPonto Boolean @default(true)
+
   // Geofencing
   geofenceLat    Float?
   geofenceLng    Float?

@@ -66,7 +66,19 @@ async function loginEmail(req, res, next) {
     // Usuário comum
     const usuario = await prisma.usuario.findFirst({
       where: { email, ativo: true },
-      include: { tenant: { select: { id: true, nomeFantasia: true, status: true, fotoObrigatoria: true, geofenceAtivo: true } } }
+      include: {
+        tenant: {
+          select: {
+            id: true,
+            nomeFantasia: true,
+            status: true,
+            fotoObrigatoria: true,
+            geofenceAtivo: true,
+            permitirTotem: true,
+            permitirMeuPonto: true,
+          },
+        },
+      }
     });
 
     if (!usuario) return res.status(401).json({ error: 'Credenciais inválidas' });
@@ -100,6 +112,17 @@ async function loginPin(req, res, next) {
     const { pin, tenantId, deviceId } = req.body;
     if (!pin || !tenantId) {
       return res.status(400).json({ error: 'PIN e tenantId são obrigatórios' });
+    }
+
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { id: true, status: true, permitirTotem: true },
+    });
+    if (!tenant || tenant.status !== 'ATIVO') {
+      return res.status(403).json({ error: 'Empresa com acesso suspenso' });
+    }
+    if (tenant.permitirTotem === false) {
+      return res.status(403).json({ error: 'Registro por totem está desativado para esta empresa' });
     }
 
     // Busca todos os colaboradores ativos do tenant e compara PIN

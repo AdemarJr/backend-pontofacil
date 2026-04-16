@@ -208,10 +208,30 @@ async function registrar(req, res, next) {
 
     // Busca configurações do tenant
     const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
+    if (!tenant) {
+      return res.status(404).json({ error: 'Empresa não encontrada' });
+    }
+
+    const origemBody = req.body.origem;
+    let origem = 'TOTEM';
+    if (origemBody === 'APP_INDIVIDUAL') {
+      if (req.usuario.role !== 'COLABORADOR') {
+        return res.status(403).json({ error: 'Registro pelo app é apenas para colaboradores' });
+      }
+      origem = 'APP_INDIVIDUAL';
+    }
+
+    if (origem === 'TOTEM' && tenant?.permitirTotem === false) {
+      return res.status(403).json({ error: 'Registro por totem está desativado para esta empresa' });
+    }
+    if (origem === 'APP_INDIVIDUAL' && tenant?.permitirMeuPonto === false) {
+      return res.status(403).json({ error: 'Registro pelo meu-ponto está desativado para esta empresa' });
+    }
 
     // Valida geofence se ativo (cerca única legada ou múltiplos locais)
     let dentroGeofence = null;
-    if (tenant.geofenceAtivo) {
+    // Regra: Totem não tem restrição de localização.
+    if (tenant.geofenceAtivo && origem !== 'TOTEM') {
       if (!latitude || !longitude) {
         return res.status(400).json({ error: 'Localização obrigatória para este tenant' });
       }
@@ -278,15 +298,6 @@ async function registrar(req, res, next) {
       .update(req.ip || '')
       .digest('hex')
       .substring(0, 16);
-
-    const origemBody = req.body.origem;
-    let origem = 'TOTEM';
-    if (origemBody === 'APP_INDIVIDUAL') {
-      if (req.usuario.role !== 'COLABORADOR') {
-        return res.status(403).json({ error: 'Registro pelo app é apenas para colaboradores' });
-      }
-      origem = 'APP_INDIVIDUAL';
-    }
 
     // ---- REGRA ANTI-DUPLICIDADE (um tipo por dia) ----
     // Evita problemas no relatório: não pode ter 2 entradas ou 2 saídas no mesmo dia, etc.
