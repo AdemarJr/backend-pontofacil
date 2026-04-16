@@ -12,6 +12,36 @@ const {
 
 const prisma = new PrismaClient();
 
+/**
+ * Entradas de gerente vindas de <input type="datetime-local"> chegam como "YYYY-MM-DDTHH:mm" sem fuso.
+ * No Node em UTC, `new Date(isoSemFuso)` trata como horário UTC — erro típico de ~3h no Brasil.
+ * Strings com Z ou offset são interpretadas normalmente.
+ * Sem fuso explícito, assume horário civil de Brasília (UTC−3, sem horário de verão desde 2019).
+ */
+function parseDataHoraGerenteInput(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  const s = String(value ?? '').trim();
+  if (!s) return null;
+  const hasExplicitTz = /(Z|[+\-]\d{2}:?\d{2})$/.test(s);
+  if (hasExplicitTz) {
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?/);
+  if (m) {
+    const y = Number(m[1]);
+    const mo = Number(m[2]) - 1;
+    const day = Number(m[3]);
+    const h = Number(m[4]);
+    const mi = Number(m[5]);
+    const sec = m[6] != null ? Number(m[6]) : 0;
+    const offsetBrasiliaHoras = 3;
+    return new Date(Date.UTC(y, mo, day, h + offsetBrasiliaHoras, mi, sec));
+  }
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function fmtDateISO(d) {
   const dt = new Date(d);
   return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
@@ -489,15 +519,18 @@ async function ajustarPonto(req, res, next) {
     });
     if (!registro) return res.status(404).json({ error: 'Registro não encontrado' });
 
+    const dhNova = parseDataHoraGerenteInput(dataHoraNova);
+    if (!dhNova) return res.status(400).json({ error: 'dataHoraNova inválida' });
+
     const ajuste = await prisma.ajustePonto.upsert({
       where: { registroId },
-      update: { dataHoraNova: new Date(dataHoraNova), motivo, adminId },
+      update: { dataHoraNova: dhNova, motivo, adminId },
       create: {
         tenantId,
         registroId,
         adminId,
         dataHoraOriginal: registro.dataHora,
-        dataHoraNova: new Date(dataHoraNova),
+        dataHoraNova: dhNova,
         motivo,
       },
     });
@@ -529,8 +562,8 @@ async function inserirPontoManual(req, res, next) {
     });
     if (!alvo) return res.status(404).json({ error: 'Colaborador não encontrado' });
 
-    const dh = new Date(dataHora);
-    if (Number.isNaN(dh.getTime())) return res.status(400).json({ error: 'dataHora inválida' });
+    const dh = parseDataHoraGerenteInput(dataHora);
+    if (!dh) return res.status(400).json({ error: 'dataHora inválida' });
 
     // Um tipo por dia (mesma regra do registro automático, mas aplicado no dia informado)
     const inicio = new Date(dh.getFullYear(), dh.getMonth(), dh.getDate(), 0, 0, 0, 0);
@@ -641,8 +674,8 @@ async function decidirSolicitacaoAjuste(req, res, next) {
 
     // APROVAR: inserir a batida faltante (ADMIN_MANUAL) com motivo contendo a justificativa do colaborador
     const dh =
-      dataHoraEfetiva != null
-        ? new Date(dataHoraEfetiva)
+      dataHoraEfetiva != null && String(dataHoraEfetiva).trim() !== ''
+        ? parseDataHoraGerenteInput(dataHoraEfetiva)
         : sol.dataHoraSugerida
           ? new Date(sol.dataHoraSugerida)
           : null;
