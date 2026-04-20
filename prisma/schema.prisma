@@ -52,6 +52,8 @@ model Tenant {
   solicitacoesAjustePonto SolicitacaoAjustePonto[]
   locaisRegistro LocalRegistro[]
   comprovantesAusencia ComprovanteAusencia[]
+  feriados       Feriado[]
+  ferias         Ferias[]
 
   @@map("tenants")
 }
@@ -108,6 +110,10 @@ model Usuario {
   ativo       Boolean  @default(true)
   fotoPerfil  String?
 
+  /// Dados de vínculo (admissão/demissão). Usado para calcular dias aplicáveis no espelho.
+  dataAdmissao DateTime?
+  dataDemissao DateTime?
+
   /// Se preenchido, o colaborador só pode registrar dentro deste local (dentre os ativos do tenant).
   localRegistroId String?
   localRegistro   LocalRegistro? @relation(fields: [localRegistroId], references: [id], onDelete: SetNull)
@@ -124,6 +130,8 @@ model Usuario {
   comprovantesRespondidos ComprovanteAusencia[] @relation("ComprovanteRespostaAdmin")
 
   registrosExcluidos RegistroPonto[] @relation("RegistroPontoExcluidoPor")
+
+  ferias Ferias[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -315,6 +323,53 @@ enum StatusComprovante {
   PENDENTE
   APROVADO
   REJEITADO
+}
+
+// ---- FERIADOS (por empresa) ----
+model Feriado {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// Dia do feriado no formato YYYY-MM-DD (evita problemas de fuso)
+  data      String
+  nome      String
+  /// Se true, não há expediente/registro esperado no dia (impacta espelho/resumo).
+  suspendeExpediente Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, data])
+  @@index([tenantId, data])
+  @@map("feriados")
+}
+
+// ---- FÉRIAS (por colaborador) ----
+model Ferias {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usuarioId String
+  usuario   Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  /// Período (YYYY-MM-DD) inclusivo
+  dataInicio String
+  dataFim    String
+  status     StatusFerias @default(APROVADA)
+  observacao String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, usuarioId])
+  @@index([tenantId, dataInicio, dataFim])
+  @@map("ferias")
+}
+
+enum StatusFerias {
+  APROVADA
+  CANCELADA
 }
 
 // ---- SUPER ADMIN (separado dos tenants) ----

@@ -47,6 +47,15 @@ function fmtDateISO(d) {
   return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
 }
 
+function diasDoMesISO(mesNum, anoNum) {
+  const last = new Date(anoNum, mesNum, 0).getDate();
+  const dias = [];
+  for (let d = 1; d <= last; d++) {
+    dias.push(`${anoNum}-${pad2(mesNum)}-${pad2(d)}`);
+  }
+  return dias;
+}
+
 function whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }) {
   // Importante: relatórios devem respeitar o horário efetivo (ajuste.dataHoraNova quando existir).
   // Sem isso, o admin "ajusta" mas o espelho continua filtrando pelo dataHora original e parece que não salvou.
@@ -67,9 +76,10 @@ function whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }) {
 }
 
 /**
- * Agrupa registros por usuário/dia e aplica escalas + tolerância do tenant.
+ * Espelho mensal completo: preenche todos os dias do mês (mesmo sem batidas),
+ * aplicando feriados/férias/admissão/demissão no “esperado” e nas flags.
  */
-async function montarPorUsuarioEspelho(registros, tenantId) {
+async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, usuarioFiltroId }) {
   const tenant = await prisma.tenant.findUnique({
     where: { id: tenantId },
     select: { toleranciaMinutos: true },
@@ -83,7 +93,52 @@ async function montarPorUsuarioEspelho(registros, tenantId) {
     return achado?.origem || '';
   }
 
-  const uids = [...new Set(registros.map((r) => r.usuarioId))];
+  const diasMes = diasDoMesISO(mesNum, anoNum);
+  const primeiroDia = diasMes[0];
+  const ultimoDia = diasMes[diasMes.length - 1];
+
+  const colaboradores = await prisma.usuario.findMany({
+    where: {
+      tenantId,
+      role: 'COLABORADOR',
+      ativo: true,
+      ...(usuarioFiltroId ? { id: String(usuarioFiltroId) } : {}),
+    },
+    select: { id: true, nome: true, cargo: true, departamento: true, dataAdmissao: true, dataDemissao: true },
+    orderBy: { nome: 'asc' },
+  });
+
+  if (colaboradores.length === 0) {
+    return {};
+  }
+
+  const uids = colaboradores.map((u) => u.id);
+  const uidSet = new Set(uids);
+  const metaPorUsuario = Object.fromEntries(
+    colaboradores.map((u) => [u.id, { dataAdmissao: u.dataAdmissao, dataDemissao: u.dataDemissao }])
+  );
+
+  const feriados = await prisma.feriado.findMany({
+    where: { tenantId, data: { gte: primeiroDia, lte: ultimoDia } },
+    select: { data: true, nome: true, suspendeExpediente: true },
+  });
+  const feriadoPorDia = Object.fromEntries(feriados.map((f) => [f.data, f]));
+
+  const ferias = await prisma.ferias.findMany({
+    where: {
+      tenantId,
+      usuarioId: { in: uids },
+      status: 'APROVADA',
+      AND: [{ dataInicio: { lte: ultimoDia } }, { dataFim: { gte: primeiroDia } }],
+    },
+    select: { usuarioId: true, dataInicio: true, dataFim: true, observacao: true },
+  });
+  const feriasPorUsuario = {};
+  for (const f of ferias) {
+    if (!feriasPorUsuario[f.usuarioId]) feriasPorUsuario[f.usuarioId] = [];
+    feriasPorUsuario[f.usuarioId].push(f);
+  }
+
   const escalasAll = await prisma.escala.findMany({
     where: { tenantId, usuarioId: { in: uids }, ativo: true },
     orderBy: { updatedAt: 'desc' },
@@ -94,27 +149,15 @@ async function montarPorUsuarioEspelho(registros, tenantId) {
     escalasPorUsuario[e.usuarioId].push(e);
   }
 
-  const porUsuario = {};
+  /** @type {Record<string, Record<string, any[]>>} */
+  const pontosPorUsuarioDia = {};
   for (const r of registros) {
     const uid = r.usuarioId;
-    if (!porUsuario[uid]) {
-      porUsuario[uid] = {
-        usuario: r.usuario,
-        diasTrabalhados: {},
-        totalHoras: '00:00',
-        totalExtras: '00:00',
-        totalTrabalhadoMin: 0,
-        totalEsperadoMin: 0,
-        saldoMesMin: 0,
-        horaExtraMesMin: 0,
-        deficitMesMin: 0,
-        horaExtraMes: '00:00',
-        saldoMes: '00:00',
-      };
-    }
-    const dia = fmtDateISO(r.dataHora);
-    if (!porUsuario[uid].diasTrabalhados[dia]) porUsuario[uid].diasTrabalhados[dia] = [];
-    porUsuario[uid].diasTrabalhados[dia].push({
+    if (!uidSet.has(uid)) continue;
+    const dia = fmtDateISO(r.ajuste ? r.ajuste.dataHoraNova : r.dataHora);
+    if (!pontosPorUsuarioDia[uid]) pontosPorUsuarioDia[uid] = {};
+    if (!pontosPorUsuarioDia[uid][dia]) pontosPorUsuarioDia[uid][dia] = [];
+    pontosPorUsuarioDia[uid][dia].push({
       id: r.id,
       tipo: r.tipo,
       dataHora: r.ajuste ? r.ajuste.dataHoraNova : r.dataHora,
@@ -125,31 +168,65 @@ async function montarPorUsuarioEspelho(registros, tenantId) {
     });
   }
 
-  for (const uid in porUsuario) {
+  const porUsuario = {};
+  for (const u of colaboradores) {
+    porUsuario[u.id] = {
+      usuario: { id: u.id, nome: u.nome, cargo: u.cargo, departamento: u.departamento },
+      diasTrabalhados: {},
+      totalHoras: '00:00',
+      totalExtras: '00:00',
+      totalTrabalhadoMin: 0,
+      totalEsperadoMin: 0,
+      saldoMesMin: 0,
+      horaExtraMesMin: 0,
+      deficitMesMin: 0,
+      horaExtraMes: '00:00',
+      saldoMes: '00:00',
+    };
+  }
+
+  for (const uid of uids) {
     let totalMinutos = 0;
     let totalExtras = 0;
     let totalEsperadoMin = 0;
     const listaEsc = escalasPorUsuario[uid] || [];
+    const meta = metaPorUsuario[uid] || {};
+    const feriasU = feriasPorUsuario[uid] || [];
 
-    for (const dia in porUsuario[uid].diasTrabalhados) {
-      const pontos = porUsuario[uid].diasTrabalhados[dia];
+    for (const dia of diasMes) {
+      const pontos = (pontosPorUsuarioDia[uid] && pontosPorUsuarioDia[uid][dia]) || [];
       const escalaDia = escalaParaDia(listaEsc, dia);
       const calc = calcularDia(pontos, {
         escala: escalaDia || undefined,
         toleranciaMinutos: tol,
         dataRef: dia,
       });
-      const minutos = calc.minutosTrabalhados;
-      const espMin = escalaDia
-        ? Math.round(Number(escalaDia.cargaHorariaDiaria) * 60)
-        : 8 * 60;
+      let minutos = calc.minutosTrabalhados;
+
+      const feriado = feriadoPorDia[dia];
+      const feriasNoDia = feriasU.find((f) => f.dataInicio <= dia && f.dataFim >= dia) || null;
+      const admissaoOk = meta?.dataAdmissao ? fmtDateISO(meta.dataAdmissao) <= dia : true;
+      const naoDemitidoNoDia = meta?.dataDemissao ? fmtDateISO(meta.dataDemissao) >= dia : true;
+
+      const suspendeExpediente =
+        (feriado?.suspendeExpediente === true) || Boolean(feriasNoDia) || !admissaoOk || !naoDemitidoNoDia;
+
+      const espMinBase = escalaDia ? Math.round(Number(escalaDia.cargaHorariaDiaria) * 60) : 8 * 60;
+      const espMin = suspendeExpediente ? 0 : espMinBase;
       totalEsperadoMin += espMin;
+
+      let flags = calc.flags;
+      let extrasMinDia = calc.extrasMin;
+      if (suspendeExpediente) {
+        flags = { ...flags, faltandoMarcacao: false };
+        extrasMinDia = Math.max(0, minutos);
+      }
 
       porUsuario[uid].diasTrabalhados[dia] = {
         pontos,
         minutosTrabalhados: minutos,
         horasTrabalhadas: fmtHours(minutos),
-        extras: fmtHours(calc.extrasMin),
+        extras: fmtHours(extrasMinDia),
         intervaloMin: calc.intervaloMin,
         intervalo: calc.intervaloMin == null ? '' : fmtHours(calc.intervaloMin),
         marcacoes: {
@@ -164,14 +241,24 @@ async function montarPorUsuarioEspelho(registros, tenantId) {
           retornoAlmoco: origemDoTipoEm(pontos, 'RETORNO_ALMOCO', calc.retornoAlmoco),
           saida: origemDoTipoEm(pontos, 'SAIDA', calc.saida),
         },
-        flags: calc.flags,
+        flags,
         esperado: calc.esperado,
         jornadaContratualMin: calc.jornadaContratualMin,
         saldoDiaMin: minutos - espMin,
+        contextoDia: {
+          suspendeExpediente,
+          ...(feriado
+            ? { feriado: { nome: feriado.nome, suspendeExpediente: feriado.suspendeExpediente } }
+            : {}),
+          ...(feriasNoDia ? { ferias: { dataInicio: feriasNoDia.dataInicio, dataFim: feriasNoDia.dataFim } } : {}),
+          ...(meta?.dataAdmissao ? { dataAdmissao: fmtDateISO(meta.dataAdmissao) } : {}),
+          ...(meta?.dataDemissao ? { dataDemissao: fmtDateISO(meta.dataDemissao) } : {}),
+        },
       };
       totalMinutos += minutos;
-      totalExtras += calc.extrasMin;
+      totalExtras += extrasMinDia;
     }
+
     const horaExtraMesMin = Math.max(0, totalMinutos - totalEsperadoMin);
     const deficitMesMin = Math.max(0, totalEsperadoMin - totalMinutos);
 
@@ -208,7 +295,11 @@ async function espelhoPonto(req, res, next) {
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
     });
 
-    const porUsuario = await montarPorUsuarioEspelho(registros, tenantId);
+    const porUsuario = await montarPorUsuarioEspelho(registros, tenantId, {
+      mesNum,
+      anoNum,
+      usuarioFiltroId: usuarioId || null,
+    });
 
     res.json({
       periodo: { mes: mesNum, ano: anoNum },
@@ -228,6 +319,14 @@ function buildEspelhoRows(relatorio, periodo) {
       const f = d.flags || {};
       const esp = d.esperado || null;
       const o = d.origens || {};
+      const ctx = d.contextoDia || null;
+      let contextoDia = '';
+      if (ctx?.feriado?.nome && ctx?.feriado?.suspendeExpediente) contextoDia = `Feriado: ${ctx.feriado.nome}`;
+      else if (ctx?.ferias) contextoDia = `Férias (${ctx.ferias.dataInicio} → ${ctx.ferias.dataFim})`;
+      else if (ctx?.suspendeExpediente) {
+        if (ctx?.dataAdmissao) contextoDia = `Antes da admissão (a partir de ${ctx.dataAdmissao})`;
+        else if (ctx?.dataDemissao) contextoDia = `Após demissão (${ctx.dataDemissao})`;
+      }
       rows.push({
         periodo: `${pad2(periodo.mes)}/${periodo.ano}`,
         dia,
@@ -248,6 +347,7 @@ function buildEspelhoRows(relatorio, periodo) {
         intervalo: d.intervalo ?? '',
         horasTrabalhadas: d.horasTrabalhadas ?? '',
         extras: d.extras ?? '',
+        contextoDia,
         faltandoMarcacao: f.faltandoMarcacao ? 'SIM' : 'NAO',
         intervaloInsuficiente: f.intervaloInsuficiente ? 'SIM' : 'NAO',
         jornadaExcedida: f.jornadaExcedida ? 'SIM' : 'NAO',
@@ -282,6 +382,7 @@ function rowsToCsv(rows) {
     'intervalo',
     'horasTrabalhadas',
     'extras',
+    'contextoDia',
     'faltandoMarcacao',
     'intervaloInsuficiente',
     'jornadaExcedida',
@@ -321,7 +422,11 @@ async function espelhoExport(req, res, next) {
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
     });
 
-    const porUsuario = await montarPorUsuarioEspelho(registros, tenantId);
+    const porUsuario = await montarPorUsuarioEspelho(registros, tenantId, {
+      mesNum,
+      anoNum,
+      usuarioFiltroId: usuarioId || null,
+    });
     const periodo = { mes: mesNum, ano: anoNum };
     const relatorio = Object.values(porUsuario);
     const rows = buildEspelhoRows(relatorio, periodo);
@@ -352,6 +457,7 @@ async function espelhoExport(req, res, next) {
         { header: 'Intervalo', key: 'intervalo', width: 10 },
         { header: 'Horas trabalhadas', key: 'horasTrabalhadas', width: 14 },
         { header: 'Extras no dia', key: 'extras', width: 12 },
+        { header: 'Contexto (feriado/férias)', key: 'contextoDia', width: 28 },
         { header: 'Faltando marcação', key: 'faltandoMarcacao', width: 16 },
         { header: 'Intervalo insuficiente', key: 'intervaloInsuficiente', width: 18 },
         { header: 'Jornada excedida', key: 'jornadaExcedida', width: 14 },
@@ -379,8 +485,8 @@ async function espelhoExport(req, res, next) {
       doc.fontSize(10).text(`Período: ${pad2(mesNum)}/${anoNum}`, { align: 'left' });
       doc.moveDown(0.5);
 
-      const headers = ['Dia', 'Nome', 'Entrada', 'Saída', 'Horas', 'Extras', 'Flags'];
-      const colW = [52, 140, 44, 44, 44, 44, 120];
+      const headers = ['Dia', 'Nome', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
+      const colW = [52, 120, 40, 40, 40, 40, 92, 92];
       const startX = doc.x;
       let y = doc.y;
 
@@ -408,7 +514,7 @@ async function espelhoExport(req, res, next) {
         if (r.saidaAntecipada === 'SIM') flags.push('SAIDA_ANT');
         if (r.almocoForaJanela === 'SIM') flags.push('ALMOCO');
         rowLine(
-          [r.dia, r.nome, r.entrada, r.saida, r.horasTrabalhadas, r.extras, flags.join(',')],
+          [r.dia, r.nome, r.entrada, r.saida, r.horasTrabalhadas, r.extras, r.contextoDia || '', flags.join(',')],
           false
         );
       }
@@ -445,7 +551,11 @@ async function bancoHorasResumo(req, res, next) {
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
     });
 
-    const porUsuario = await montarPorUsuarioEspelho(registros, tenantId);
+    const porUsuario = await montarPorUsuarioEspelho(registros, tenantId, {
+      mesNum,
+      anoNum,
+      usuarioFiltroId: usuarioId || null,
+    });
     const lista = Object.values(porUsuario).map((u) => ({
       usuario: u.usuario,
       totalTrabalhadoMin: u.totalTrabalhadoMin,
@@ -460,7 +570,8 @@ async function bancoHorasResumo(req, res, next) {
 
     res.json({
       periodo: { mes: mesNum, ano: anoNum },
-      obs: 'Saldo = trabalhado − esperado por dia (esperado da escala ativa ou 8h se não houver escala no dia).',
+      obs:
+        'Saldo = trabalhado − esperado no mês. O esperado considera todos os dias do mês; em feriados (com expediente suspenso), férias aprovadas, antes da admissão ou após demissão o esperado do dia é 0.',
       resumo: lista,
     });
   } catch (err) {
@@ -474,14 +585,40 @@ async function resumoDia(req, res, next) {
     const hoje = new Date();
     const inicio = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
     const fim = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate(), 23, 59, 59);
+    const diaIso = fmtDateISO(hoje);
 
-    const [totalColaboradores, registrosHoje] = await Promise.all([
-      prisma.usuario.count({ where: { tenantId, ativo: true, role: 'COLABORADOR' } }),
+    const [feriadoHoje, feriasHoje, colaboradoresAtivos, registrosHoje] = await Promise.all([
+      prisma.feriado.findFirst({
+        where: { tenantId, data: diaIso, suspendeExpediente: true },
+        select: { id: true, nome: true },
+      }),
+      prisma.ferias.findMany({
+        where: {
+          tenantId,
+          status: 'APROVADA',
+          dataInicio: { lte: diaIso },
+          dataFim: { gte: diaIso },
+        },
+        select: { usuarioId: true },
+      }),
+      prisma.usuario.findMany({
+        where: { tenantId, ativo: true, role: 'COLABORADOR' },
+        select: { id: true, dataAdmissao: true, dataDemissao: true },
+      }),
       prisma.registroPonto.findMany({
         where: { tenantId, dataHora: { gte: inicio, lte: fim } },
         select: { usuarioId: true, tipo: true, dataHora: true },
       }),
     ]);
+
+    const feriasSet = new Set((feriasHoje || []).map((f) => f.usuarioId));
+    const elegiveis = colaboradoresAtivos.filter((u) => {
+      const admOk = u.dataAdmissao ? fmtDateISO(u.dataAdmissao) <= diaIso : true;
+      const naoDemitido = u.dataDemissao ? fmtDateISO(u.dataDemissao) >= diaIso : true;
+      return admOk && naoDemitido && !feriasSet.has(u.id);
+    });
+
+    const totalColaboradores = elegiveis.length;
 
     const presentes = new Set();
     const ausentes = new Set();
@@ -491,6 +628,17 @@ async function resumoDia(req, res, next) {
         presentes.delete(r.usuarioId);
         ausentes.add(r.usuarioId);
       }
+    }
+
+    // Em feriado (suspende expediente), não faz sentido contar presença/ausência.
+    if (feriadoHoje) {
+      return res.json({
+        totalColaboradores,
+        presentes: 0,
+        ausentes: 0,
+        registrosHoje: registrosHoje.length,
+        contextoDia: { feriado: { nome: feriadoHoje.nome } },
+      });
     }
 
     res.json({

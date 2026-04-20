@@ -14,6 +14,8 @@ async function listar(req, res, next) {
         id: true, nome: true, email: true, cargo: true,
         departamento: true, role: true, ativo: true, createdAt: true,
         localRegistroId: true,
+        dataAdmissao: true,
+        dataDemissao: true,
       },
       orderBy: { nome: 'asc' },
     });
@@ -29,6 +31,8 @@ async function buscarPorId(req, res, next) {
         id: true, nome: true, email: true, cargo: true,
         departamento: true, role: true, ativo: true, createdAt: true,
         escalas: true,
+        dataAdmissao: true,
+        dataDemissao: true,
       },
     });
     if (!usuario) return res.status(404).json({ error: 'Usuário não encontrado' });
@@ -38,7 +42,7 @@ async function buscarPorId(req, res, next) {
 
 async function criar(req, res, next) {
   try {
-    const { nome, email, pin, cargo, departamento, role, localRegistroId, enviarConviteEmail } = req.body;
+    const { nome, email, pin, cargo, departamento, role, localRegistroId, enviarConviteEmail, dataAdmissao, dataDemissao } = req.body;
 
     if (!nome || !email || !pin) {
       return res.status(400).json({ error: 'Nome, email e PIN são obrigatórios' });
@@ -72,6 +76,8 @@ async function criar(req, res, next) {
         departamento: departamento || null,
         role: role === 'ADMIN' ? 'ADMIN' : 'COLABORADOR',
         ...(localRegistroId && { localRegistroId }),
+        dataAdmissao: dataAdmissao ? new Date(String(dataAdmissao) + 'T12:00:00') : null,
+        dataDemissao: dataDemissao ? new Date(String(dataDemissao) + 'T12:00:00') : null,
       },
       select: { id: true, nome: true, email: true, cargo: true, role: true, createdAt: true }
     });
@@ -112,7 +118,7 @@ async function criar(req, res, next) {
 
 async function atualizar(req, res, next) {
   try {
-    const { nome, email, cargo, departamento, ativo, pin, localRegistroId } = req.body;
+    const { nome, email, cargo, departamento, ativo, pin, localRegistroId, dataAdmissao, dataDemissao } = req.body;
 
     const dados = {
       ...(nome && { nome }),
@@ -121,6 +127,23 @@ async function atualizar(req, res, next) {
       ...(departamento !== undefined && { departamento }),
       ...(ativo !== undefined && { ativo: Boolean(ativo) }),
     };
+
+    if (dataAdmissao !== undefined) {
+      if (dataAdmissao === null || String(dataAdmissao).trim() === '') dados.dataAdmissao = null;
+      else {
+        const dt = new Date(String(dataAdmissao) + 'T12:00:00');
+        if (Number.isNaN(dt.getTime())) return res.status(400).json({ error: 'dataAdmissao inválida (use YYYY-MM-DD)' });
+        dados.dataAdmissao = dt;
+      }
+    }
+    if (dataDemissao !== undefined) {
+      if (dataDemissao === null || String(dataDemissao).trim() === '') dados.dataDemissao = null;
+      else {
+        const dt = new Date(String(dataDemissao) + 'T12:00:00');
+        if (Number.isNaN(dt.getTime())) return res.status(400).json({ error: 'dataDemissao inválida (use YYYY-MM-DD)' });
+        dados.dataDemissao = dt;
+      }
+    }
 
     if (email !== undefined) {
       const emailNorm = String(email || '').trim().toLowerCase();

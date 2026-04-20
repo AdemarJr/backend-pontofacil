@@ -17,6 +17,8 @@ const escalaRoutes = require('./routes/escala.routes');
 const localRoutes = require('./routes/local.routes');
 const superAdminRoutes = require('./routes/superadmin.routes');
 const comprovanteAusenciaRoutes = require('./routes/comprovanteAusencia.routes');
+const feriadoRoutes = require('./routes/feriado.routes');
+const feriasRoutes = require('./routes/ferias.routes');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -114,6 +116,8 @@ app.use('/api/escalas', escalaRoutes);
 app.use('/api/locais-registro', localRoutes);
 app.use('/api/super-admin', superAdminRoutes);
 app.use('/api/comprovantes-ausencia', comprovanteAusenciaRoutes);
+app.use('/api/feriados', feriadoRoutes);
+app.use('/api/ferias', feriasRoutes);
 
 // Endpoint para diagnosticar IP de saída (egress IP)
 app.get('/api/check-ip', (req, res) => {
