@@ -54,6 +54,7 @@ model Tenant {
   comprovantesAusencia ComprovanteAusencia[]
   feriados       Feriado[]
   ferias         Ferias[]
+  espelhoFechamentos EspelhoFechamento[]
 
   @@map("tenants")
 }
@@ -132,6 +133,7 @@ model Usuario {
   registrosExcluidos RegistroPonto[] @relation("RegistroPontoExcluidoPor")
 
   ferias Ferias[]
+  espelhoFechamentos EspelhoFechamento[]
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -323,6 +325,40 @@ enum StatusComprovante {
   PENDENTE
   APROVADO
   REJEITADO
+}
+
+// ---- FECHAMENTO / ACEITE DO ESPELHO MENSAL (COLABORADOR) ----
+model EspelhoFechamento {
+  id        String   @id @default(uuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usuarioId String
+  usuario   Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  /// Competência do fechamento (mês/ano)
+  mes       Int
+  ano       Int
+
+  /// Hash do espelho (rows) no momento do aceite (garante integridade)
+  espelhoHash String
+  aprovadoEm  DateTime @default(now())
+
+  /// Assinatura capturada na tela (opcional). Pode ser um dataURL "data:image/png;base64,..."
+  assinaturaDataUrl String? @db.Text
+  /// Vetor de traços/pontos (opcional), para re-renderizar sem armazenar imagem
+  assinaturaStrokes Json?
+
+  /// Auditoria (não armazena IP em claro)
+  ipHash    String?
+  userAgent String?
+  deviceId  String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, usuarioId, mes, ano])
+  @@index([tenantId, mes, ano])
+  @@index([tenantId, usuarioId])
+  @@map("espelho_fechamentos")
 }
 
 // ---- FERIADOS (por empresa) ----

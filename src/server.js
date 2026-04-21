@@ -19,9 +19,15 @@ const superAdminRoutes = require('./routes/superadmin.routes');
 const comprovanteAusenciaRoutes = require('./routes/comprovanteAusencia.routes');
 const feriadoRoutes = require('./routes/feriado.routes');
 const feriasRoutes = require('./routes/ferias.routes');
+const colaboradorRoutes = require('./routes/colaborador.routes');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Importante: atrás de proxy (Railway/Easypanel/Nginx), precisamos confiar no X-Forwarded-For
+// para rate-limit e auditoria (req.ip). Deve rodar ANTES de qualquer rateLimit/rotas.
+const { aplicarTrustProxy } = require('./middlewares/trustProxy.middleware');
+aplicarTrustProxy(app);
 
 function normalizeOrigin(value) {
   if (!value || typeof value !== 'string') return '';
@@ -118,6 +124,7 @@ app.use('/api/super-admin', superAdminRoutes);
 app.use('/api/comprovantes-ausencia', comprovanteAusenciaRoutes);
 app.use('/api/feriados', feriadoRoutes);
 app.use('/api/ferias', feriasRoutes);
+app.use('/api/colaborador', colaboradorRoutes);
 
 // Endpoint para diagnosticar IP de saída (egress IP)
 app.get('/api/check-ip', (req, res) => {

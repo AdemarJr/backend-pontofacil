@@ -2,6 +2,7 @@
 const { PrismaClient } = require('@prisma/client');
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
+const crypto = require('crypto');
 const {
   calcularDia,
   escalaParaDia,
@@ -531,6 +532,323 @@ async function espelhoExport(req, res, next) {
   }
 }
 
+function hashEspelhoRows(rows) {
+  // Hash estável do conteúdo do espelho exportável (garante integridade no aceite)
+  const payload = JSON.stringify(rows);
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+/** Colaborador: espelho mensal do próprio usuário (visualização) */
+async function espelhoMeu(req, res, next) {
+  try {
+    const { mes, ano } = req.query;
+    const tenantId = req.tenantId;
+    const usuarioId = req.usuario.id;
+
+    const mesNum = parseInt(mes) || new Date().getMonth() + 1;
+    const anoNum = parseInt(ano) || new Date().getFullYear();
+    const dataInicio = new Date(anoNum, mesNum - 1, 1);
+    const dataFim = new Date(anoNum, mesNum, 0, 23, 59, 59);
+
+    const registros = await prisma.registroPonto.findMany({
+      where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
+      include: {
+        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
+        ajuste: true,
+      },
+      orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
+    });
+
+    const porUsuario = await montarPorUsuarioEspelho(registros, tenantId, {
+      mesNum,
+      anoNum,
+      usuarioFiltroId: usuarioId,
+    });
+    const periodo = { mes: mesNum, ano: anoNum };
+    const relatorio = Object.values(porUsuario);
+    const rows = buildEspelhoRows(relatorio, periodo);
+    const espelhoHash = hashEspelhoRows(rows);
+
+    const fechamento = await prisma.espelhoFechamento.findFirst({
+      where: { tenantId, usuarioId, mes: mesNum, ano: anoNum },
+      select: {
+        id: true,
+        mes: true,
+        ano: true,
+        espelhoHash: true,
+        aprovadoEm: true,
+        createdAt: true,
+      },
+    });
+
+    return res.json({
+      periodo,
+      espelho: relatorio[0] || null,
+      espelhoHash,
+      fechamento,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** Colaborador: export do próprio espelho (csv/xlsx/pdf) */
+async function espelhoMeuExport(req, res, next) {
+  try {
+    const { mes, ano, format } = req.query;
+    const tenantId = req.tenantId;
+    const usuarioId = req.usuario.id;
+
+    const mesNum = parseInt(mes) || new Date().getMonth() + 1;
+    const anoNum = parseInt(ano) || new Date().getFullYear();
+    const dataInicio = new Date(anoNum, mesNum - 1, 1);
+    const dataFim = new Date(anoNum, mesNum, 0, 23, 59, 59);
+
+    const registros = await prisma.registroPonto.findMany({
+      where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
+      include: {
+        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
+        ajuste: true,
+      },
+      orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
+    });
+
+    const porUsuario = await montarPorUsuarioEspelho(registros, tenantId, {
+      mesNum,
+      anoNum,
+      usuarioFiltroId: usuarioId,
+    });
+    const periodo = { mes: mesNum, ano: anoNum };
+    const relatorio = Object.values(porUsuario);
+    const rows = buildEspelhoRows(relatorio, periodo);
+
+    const fmt = String(format || 'csv').toLowerCase();
+    const baseName = `espelho_ponto_${pad2(mesNum)}_${anoNum}`;
+
+    if (fmt === 'xlsx' || fmt === 'excel') {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Espelho');
+      ws.columns = [
+        { header: 'Período', key: 'periodo', width: 10 },
+        { header: 'Dia', key: 'dia', width: 12 },
+        { header: 'Nome', key: 'nome', width: 28 },
+        { header: 'Cargo', key: 'cargo', width: 16 },
+        { header: 'Departamento', key: 'departamento', width: 18 },
+        { header: 'Entrada', key: 'entrada', width: 10 },
+        { header: 'Origem (Entrada)', key: 'origemEntrada', width: 16 },
+        { header: 'Saída Almoço', key: 'saidaAlmoco', width: 12 },
+        { header: 'Origem (Saída Almoço)', key: 'origemSaidaAlmoco', width: 20 },
+        { header: 'Retorno Almoço', key: 'retornoAlmoco', width: 13 },
+        { header: 'Origem (Retorno)', key: 'origemRetornoAlmoco', width: 18 },
+        { header: 'Saída', key: 'saida', width: 10 },
+        { header: 'Origem (Saída)', key: 'origemSaida', width: 16 },
+        { header: 'Entrada esperada (escala)', key: 'entradaEsperada', width: 16 },
+        { header: 'Saída esperada (escala)', key: 'saidaEsperada', width: 16 },
+        { header: 'Carga prevista (h)', key: 'cargaHorariaPrevista', width: 12 },
+        { header: 'Intervalo', key: 'intervalo', width: 10 },
+        { header: 'Horas trabalhadas', key: 'horasTrabalhadas', width: 14 },
+        { header: 'Extras no dia', key: 'extras', width: 12 },
+        { header: 'Contexto (feriado/férias)', key: 'contextoDia', width: 28 },
+        { header: 'Faltando marcação', key: 'faltandoMarcacao', width: 16 },
+        { header: 'Intervalo insuficiente', key: 'intervaloInsuficiente', width: 18 },
+        { header: 'Jornada excedida', key: 'jornadaExcedida', width: 14 },
+        { header: 'Entrada atrasada', key: 'entradaAtrasada', width: 14 },
+        { header: 'Saída antecipada', key: 'saidaAntecipada', width: 14 },
+        { header: 'Almoço fora da janela', key: 'almocoForaJanela', width: 18 },
+        { header: 'Saldo dia', key: 'saldoDia', width: 12 },
+      ];
+      ws.addRows(rows);
+      ws.getRow(1).font = { bold: true };
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${baseName}.xlsx"`);
+      await wb.xlsx.write(res);
+      return res.end();
+    }
+
+    if (fmt === 'pdf') {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${baseName}.pdf"`);
+
+      const doc = new PDFDocument({ size: 'A4', margin: 28 });
+      doc.pipe(res);
+      doc.fontSize(14).text('Espelho de Ponto', { align: 'left' });
+      doc.fontSize(10).text(`Período: ${pad2(mesNum)}/${anoNum}`, { align: 'left' });
+      doc.moveDown(0.5);
+
+      const headers = ['Dia', 'Nome', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
+      const colW = [52, 120, 40, 40, 40, 40, 92, 92];
+      const startX = doc.x;
+      let y = doc.y;
+
+      function rowLine(vals, bold) {
+        let x = startX;
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7);
+        for (let i = 0; i < vals.length; i++) {
+          doc.text(String(vals[i] ?? ''), x, y, { width: colW[i], ellipsis: true });
+          x += colW[i];
+        }
+        y += 11;
+        if (y > doc.page.height - 40) {
+          doc.addPage();
+          y = doc.y;
+        }
+      }
+
+      rowLine(headers, true);
+      for (const r of rows) {
+        const flags = [];
+        if (r.faltandoMarcacao === 'SIM') flags.push('FALTA');
+        if (r.intervaloInsuficiente === 'SIM') flags.push('INTERV');
+        if (r.jornadaExcedida === 'SIM') flags.push('EXCED');
+        if (r.entradaAtrasada === 'SIM') flags.push('ATRASO');
+        if (r.saidaAntecipada === 'SIM') flags.push('SAIDA_ANT');
+        if (r.almocoForaJanela === 'SIM') flags.push('ALMOCO');
+        rowLine(
+          [r.dia, r.nome, r.entrada, r.saida, r.horasTrabalhadas, r.extras, r.contextoDia || '', flags.join(',')],
+          false
+        );
+      }
+      doc.end();
+      return;
+    }
+
+    const csv = rowsToCsv(rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}.csv"`);
+    return res.send(csv);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** Colaborador: status do fechamento do mês */
+async function fechamentoStatus(req, res, next) {
+  try {
+    const { mes, ano } = req.query;
+    const tenantId = req.tenantId;
+    const usuarioId = req.usuario.id;
+    const mesNum = parseInt(mes) || new Date().getMonth() + 1;
+    const anoNum = parseInt(ano) || new Date().getFullYear();
+
+    const fechamento = await prisma.espelhoFechamento.findFirst({
+      where: { tenantId, usuarioId, mes: mesNum, ano: anoNum },
+      select: {
+        id: true,
+        mes: true,
+        ano: true,
+        espelhoHash: true,
+        aprovadoEm: true,
+        createdAt: true,
+      },
+    });
+
+    return res.json({ periodo: { mes: mesNum, ano: anoNum }, fechamento });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** Colaborador: aprovar/assinar o espelho do mês */
+async function fechamentoAprovar(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const usuarioId = req.usuario.id;
+    const { mes, ano, assinaturaDataUrl, assinaturaStrokes, deviceId } = req.body || {};
+
+    const mesNum = parseInt(mes) || new Date().getMonth() + 1;
+    const anoNum = parseInt(ano) || new Date().getFullYear();
+    const dataInicio = new Date(anoNum, mesNum - 1, 1);
+    const dataFim = new Date(anoNum, mesNum, 0, 23, 59, 59);
+
+    const registros = await prisma.registroPonto.findMany({
+      where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
+      include: {
+        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
+        ajuste: true,
+      },
+      orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
+    });
+
+    const porUsuario = await montarPorUsuarioEspelho(registros, tenantId, {
+      mesNum,
+      anoNum,
+      usuarioFiltroId: usuarioId,
+    });
+    const periodo = { mes: mesNum, ano: anoNum };
+    const relatorio = Object.values(porUsuario);
+    const rows = buildEspelhoRows(relatorio, periodo);
+    const espelhoHash = hashEspelhoRows(rows);
+
+    const ipHash = crypto
+      .createHash('sha256')
+      .update(req.ip || '')
+      .digest('hex')
+      .substring(0, 16);
+
+    const ua = req.headers['user-agent']?.substring(0, 200) || null;
+    const assinaturaUrl = typeof assinaturaDataUrl === 'string' && assinaturaDataUrl.startsWith('data:image/')
+      ? assinaturaDataUrl
+      : null;
+
+    const existente = await prisma.espelhoFechamento.findFirst({
+      where: { tenantId, usuarioId, mes: mesNum, ano: anoNum },
+      select: { id: true },
+    });
+
+    const fechamento = existente
+      ? await prisma.espelhoFechamento.update({
+          where: { id: existente.id },
+          data: {
+            // Mantém histórico coerente: se o espelho mudou (ajuste posterior), o hash precisa acompanhar.
+            // Na prática, o RH deveria "reabrir" o mês; mas para MVP, atualizamos hash e registra nova data.
+            espelhoHash,
+            aprovadoEm: new Date(),
+            assinaturaDataUrl: assinaturaUrl,
+            assinaturaStrokes: assinaturaStrokes ?? undefined,
+            ipHash,
+            userAgent: ua,
+            deviceId: deviceId ? String(deviceId).substring(0, 120) : null,
+          },
+          select: {
+            id: true,
+            mes: true,
+            ano: true,
+            espelhoHash: true,
+            aprovadoEm: true,
+            createdAt: true,
+          },
+        })
+      : await prisma.espelhoFechamento.create({
+          data: {
+            tenantId,
+            usuarioId,
+            mes: mesNum,
+            ano: anoNum,
+            espelhoHash,
+            aprovadoEm: new Date(),
+            assinaturaDataUrl: assinaturaUrl,
+            assinaturaStrokes: assinaturaStrokes ?? undefined,
+            ipHash,
+            userAgent: ua,
+            deviceId: deviceId ? String(deviceId).substring(0, 120) : null,
+          },
+          select: {
+            id: true,
+            mes: true,
+            ano: true,
+            espelhoHash: true,
+            aprovadoEm: true,
+            createdAt: true,
+          },
+        });
+
+    return res.json({ sucesso: true, periodo, fechamento });
+  } catch (err) {
+    next(err);
+  }
+}
+
 /** Resumo de banco de horas / HE no mês (com base na escala ou 8h padrão por dia trabalhado) */
 async function bancoHorasResumo(req, res, next) {
   try {
@@ -898,6 +1216,10 @@ async function decidirSolicitacaoAjuste(req, res, next) {
 module.exports = {
   espelhoPonto,
   espelhoExport,
+  espelhoMeu,
+  espelhoMeuExport,
+  fechamentoStatus,
+  fechamentoAprovar,
   bancoHorasResumo,
   resumoDia,
   ajustarPonto,
