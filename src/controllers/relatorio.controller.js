@@ -302,6 +302,30 @@ async function espelhoPonto(req, res, next) {
       usuarioFiltroId: usuarioId || null,
     });
 
+    const fechamentos = await prisma.espelhoFechamento.findMany({
+      where: {
+        tenantId,
+        mes: mesNum,
+        ano: anoNum,
+        ...(usuarioId && { usuarioId: String(usuarioId) }),
+      },
+      select: {
+        id: true,
+        usuarioId: true,
+        mes: true,
+        ano: true,
+        status: true,
+        aprovadoEm: true,
+        solicitadoEm: true,
+        solicitadoPor: { select: { id: true, nome: true } },
+        createdAt: true,
+      },
+    });
+    const fechamentoPorUsuario = new Map(fechamentos.map((f) => [f.usuarioId, f]));
+    for (const uid of Object.keys(porUsuario)) {
+      porUsuario[uid].fechamento = fechamentoPorUsuario.get(uid) || null;
+    }
+
     res.json({
       periodo: { mes: mesNum, ano: anoNum },
       relatorio: Object.values(porUsuario),
@@ -584,11 +608,20 @@ async function espelhoMeu(req, res, next) {
       },
     });
 
+    const assinaturaPadrao = await prisma.usuario.findFirst({
+      where: { id: usuarioId, tenantId },
+      select: { assinaturaPadraoDataUrl: true, assinaturaPadraoAtualizadaEm: true },
+    });
+
     return res.json({
       periodo,
       espelho: relatorio[0] || null,
       espelhoHash,
       fechamento,
+      assinaturaPadrao: {
+        existe: Boolean(assinaturaPadrao?.assinaturaPadraoDataUrl),
+        atualizadaEm: assinaturaPadrao?.assinaturaPadraoAtualizadaEm || null,
+      },
     });
   } catch (err) {
     next(err);
@@ -797,10 +830,44 @@ async function fechamentoAprovar(req, res, next) {
       ? assinaturaDataUrl
       : null;
 
+    const usuarioAss = await prisma.usuario.findFirst({
+      where: { id: usuarioId, tenantId },
+      select: {
+        assinaturaPadraoDataUrl: true,
+        assinaturaPadraoStrokes: true,
+      },
+    });
+
+    // Assinatura única: se não vier assinatura no request, reutiliza a assinatura padrão (se existir).
+    const assinaturaFinalUrl = assinaturaUrl || usuarioAss?.assinaturaPadraoDataUrl || null;
+    const assinaturaFinalStrokes =
+      assinaturaUrl != null
+        ? (assinaturaStrokes ?? undefined)
+        : (usuarioAss?.assinaturaPadraoStrokes ?? undefined);
+
+    if (!assinaturaFinalUrl) {
+      return res.status(400).json({
+        error:
+          'Assinatura necessária no primeiro aceite. Desenhe sua assinatura uma vez; nos próximos meses você poderá apenas aprovar.',
+      });
+    }
+
     const existente = await prisma.espelhoFechamento.findFirst({
       where: { tenantId, usuarioId, mes: mesNum, ano: anoNum },
       select: { id: true },
     });
+
+    // Se o colaborador enviou uma assinatura nova, salva como assinatura padrão para os próximos meses.
+    if (assinaturaUrl) {
+      await prisma.usuario.update({
+        where: { id: usuarioId },
+        data: {
+          assinaturaPadraoDataUrl: assinaturaUrl,
+          assinaturaPadraoStrokes: assinaturaStrokes ?? undefined,
+          assinaturaPadraoAtualizadaEm: new Date(),
+        },
+      });
+    }
 
     const fechamento = existente
       ? await prisma.espelhoFechamento.update({
@@ -811,8 +878,8 @@ async function fechamentoAprovar(req, res, next) {
             status: 'ASSINADO',
             espelhoHash,
             aprovadoEm: new Date(),
-            assinaturaDataUrl: assinaturaUrl,
-            assinaturaStrokes: assinaturaStrokes ?? undefined,
+            assinaturaDataUrl: assinaturaFinalUrl,
+            assinaturaStrokes: assinaturaFinalStrokes,
             ipHash,
             userAgent: ua,
             deviceId: deviceId ? String(deviceId).substring(0, 120) : null,
@@ -836,8 +903,8 @@ async function fechamentoAprovar(req, res, next) {
             status: 'ASSINADO',
             espelhoHash,
             aprovadoEm: new Date(),
-            assinaturaDataUrl: assinaturaUrl,
-            assinaturaStrokes: assinaturaStrokes ?? undefined,
+            assinaturaDataUrl: assinaturaFinalUrl,
+            assinaturaStrokes: assinaturaFinalStrokes,
             ipHash,
             userAgent: ua,
             deviceId: deviceId ? String(deviceId).substring(0, 120) : null,

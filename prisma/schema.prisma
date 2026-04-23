@@ -115,6 +115,12 @@ model Usuario {
   dataAdmissao DateTime?
   dataDemissao DateTime?
 
+  /// Assinatura padrão do colaborador (capturada uma única vez e reaproveitada nos próximos meses).
+  /// Armazena como dataURL PNG. O vetor de traços permite re-renderizar a assinatura.
+  assinaturaPadraoDataUrl String? @db.Text
+  assinaturaPadraoStrokes Json?
+  assinaturaPadraoAtualizadaEm DateTime?
+
   /// Se preenchido, o colaborador só pode registrar dentro deste local (dentre os ativos do tenant).
   localRegistroId String?
   localRegistro   LocalRegistro? @relation(fields: [localRegistroId], references: [id], onDelete: SetNull)
