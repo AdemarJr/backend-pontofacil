@@ -54,7 +54,7 @@ model Tenant {
   comprovantesAusencia ComprovanteAusencia[]
   feriados       Feriado[]
   ferias         Ferias[]
-  espelhoFechamentos EspelhoFechamento[]
+  espelhoFechamentos EspelhoFechamento[] @relation("EspelhoFechamentoTenant")
 
   @@map("tenants")
 }
@@ -133,7 +133,8 @@ model Usuario {
   registrosExcluidos RegistroPonto[] @relation("RegistroPontoExcluidoPor")
 
   ferias Ferias[]
-  espelhoFechamentos EspelhoFechamento[]
+  espelhoFechamentosColaborador EspelhoFechamento[] @relation("EspelhoFechamentoColaborador")
+  espelhoFechamentosSolicitados  EspelhoFechamento[] @relation("EspelhoFechamentoSolicitadoPor")
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -327,21 +328,35 @@ enum StatusComprovante {
   REJEITADO
 }
 
+enum StatusEspelhoFechamento {
+  /// Gestor pediu conferência/assinatura; ainda sem aceite do colaborador
+  AGUARDANDO_ASSINATURA
+  /// Colaborador assinou (homologado)
+  ASSINADO
+}
+
 // ---- FECHAMENTO / ACEITE DO ESPELHO MENSAL (COLABORADOR) ----
 model EspelhoFechamento {
   id        String   @id @default(uuid())
   tenantId  String
-  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant    Tenant   @relation("EspelhoFechamentoTenant", fields: [tenantId], references: [id], onDelete: Cascade)
   usuarioId String
-  usuario   Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  usuario   Usuario  @relation("EspelhoFechamentoColaborador", fields: [usuarioId], references: [id], onDelete: Cascade)
 
   /// Competência do fechamento (mês/ano)
   mes       Int
   ano       Int
 
+  status StatusEspelhoFechamento @default(ASSINADO)
+
+  /// Gestor que solicitou assinatura (quando status = AGUARDANDO_ASSINATURA)
+  solicitadoPorId String?
+  solicitadoPor   Usuario? @relation("EspelhoFechamentoSolicitadoPor", fields: [solicitadoPorId], references: [id], onDelete: SetNull)
+  solicitadoEm    DateTime?
+
   /// Hash do espelho (rows) no momento do aceite (garante integridade)
-  espelhoHash String
-  aprovadoEm  DateTime @default(now())
+  espelhoHash String?
+  aprovadoEm  DateTime?
 
   /// Assinatura capturada na tela (opcional). Pode ser um dataURL "data:image/png;base64,..."
   assinaturaDataUrl String? @db.Text
@@ -358,6 +373,7 @@ model EspelhoFechamento {
   @@unique([tenantId, usuarioId, mes, ano])
   @@index([tenantId, mes, ano])
   @@index([tenantId, usuarioId])
+  @@index([tenantId, status])
   @@map("espelho_fechamentos")
 }
 

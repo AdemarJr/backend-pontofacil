@@ -10,11 +10,13 @@ const {
   inserirPontoManual,
   listarSolicitacoesAjuste,
   decidirSolicitacaoAjuste,
+  solicitarAssinaturaEspelho,
 } = require('../controllers/relatorio.controller');
 
 router.use(autenticar, exigirAdmin);
 router.get('/espelho', espelhoPonto);
 router.get('/espelho/export', espelhoExport); // ?format=csv|xlsx|pdf
+router.post('/espelho/solicitar-assinatura', solicitarAssinaturaEspelho);
 router.get('/banco-horas', bancoHorasResumo);
 router.get('/resumo-dia', resumoDia);
 router.post('/ajuste', ajustarPonto);

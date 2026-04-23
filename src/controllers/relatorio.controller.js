@@ -575,8 +575,11 @@ async function espelhoMeu(req, res, next) {
         id: true,
         mes: true,
         ano: true,
+        status: true,
         espelhoHash: true,
         aprovadoEm: true,
+        solicitadoEm: true,
+        solicitadoPor: { select: { id: true, nome: true } },
         createdAt: true,
       },
     });
@@ -737,8 +740,11 @@ async function fechamentoStatus(req, res, next) {
         id: true,
         mes: true,
         ano: true,
+        status: true,
         espelhoHash: true,
         aprovadoEm: true,
+        solicitadoEm: true,
+        solicitadoPor: { select: { id: true, nome: true } },
         createdAt: true,
       },
     });
@@ -802,6 +808,7 @@ async function fechamentoAprovar(req, res, next) {
           data: {
             // Mantém histórico coerente: se o espelho mudou (ajuste posterior), o hash precisa acompanhar.
             // Na prática, o RH deveria "reabrir" o mês; mas para MVP, atualizamos hash e registra nova data.
+            status: 'ASSINADO',
             espelhoHash,
             aprovadoEm: new Date(),
             assinaturaDataUrl: assinaturaUrl,
@@ -814,6 +821,7 @@ async function fechamentoAprovar(req, res, next) {
             id: true,
             mes: true,
             ano: true,
+            status: true,
             espelhoHash: true,
             aprovadoEm: true,
             createdAt: true,
@@ -825,6 +833,7 @@ async function fechamentoAprovar(req, res, next) {
             usuarioId,
             mes: mesNum,
             ano: anoNum,
+            status: 'ASSINADO',
             espelhoHash,
             aprovadoEm: new Date(),
             assinaturaDataUrl: assinaturaUrl,
@@ -837,6 +846,7 @@ async function fechamentoAprovar(req, res, next) {
             id: true,
             mes: true,
             ano: true,
+            status: true,
             espelhoHash: true,
             aprovadoEm: true,
             createdAt: true,
@@ -844,6 +854,89 @@ async function fechamentoAprovar(req, res, next) {
         });
 
     return res.json({ sucesso: true, periodo, fechamento });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** Admin: pedir ao colaborador que revise e assine o espelho do mês (fica AGUARDANDO_ASSINATURA). */
+async function solicitarAssinaturaEspelho(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const adminId = req.usuario.id;
+    const { usuarioId, mes, ano } = req.body || {};
+
+    if (!usuarioId) {
+      return res.status(400).json({ error: 'usuarioId é obrigatório' });
+    }
+
+    const mesNum = parseInt(mes, 10) || new Date().getMonth() + 1;
+    const anoNum = parseInt(ano, 10) || new Date().getFullYear();
+
+    const colab = await prisma.usuario.findFirst({
+      where: { id: String(usuarioId), tenantId, role: 'COLABORADOR', ativo: true },
+      select: { id: true, nome: true },
+    });
+    if (!colab) {
+      return res.status(404).json({ error: 'Colaborador não encontrado' });
+    }
+
+    const existente = await prisma.espelhoFechamento.findFirst({
+      where: { tenantId, usuarioId: colab.id, mes: mesNum, ano: anoNum },
+      select: { id: true },
+    });
+
+    const agora = new Date();
+    const dadosAguardando = {
+      status: 'AGUARDANDO_ASSINATURA',
+      solicitadoPorId: adminId,
+      solicitadoEm: agora,
+      espelhoHash: null,
+      aprovadoEm: null,
+      assinaturaDataUrl: null,
+      assinaturaStrokes: null,
+      ipHash: null,
+      userAgent: null,
+      deviceId: null,
+    };
+
+    const fechamento = existente
+      ? await prisma.espelhoFechamento.update({
+          where: { id: existente.id },
+          data: dadosAguardando,
+          select: {
+            id: true,
+            mes: true,
+            ano: true,
+            status: true,
+            solicitadoEm: true,
+            solicitadoPor: { select: { id: true, nome: true } },
+          },
+        })
+      : await prisma.espelhoFechamento.create({
+          data: {
+            tenantId,
+            usuarioId: colab.id,
+            mes: mesNum,
+            ano: anoNum,
+            ...dadosAguardando,
+          },
+          select: {
+            id: true,
+            mes: true,
+            ano: true,
+            status: true,
+            solicitadoEm: true,
+            solicitadoPor: { select: { id: true, nome: true } },
+          },
+        });
+
+    return res.json({
+      sucesso: true,
+      periodo: { mes: mesNum, ano: anoNum },
+      colaborador: colab,
+      fechamento,
+    });
   } catch (err) {
     next(err);
   }
@@ -1220,6 +1313,7 @@ module.exports = {
   espelhoMeuExport,
   fechamentoStatus,
   fechamentoAprovar,
+  solicitarAssinaturaEspelho,
   bancoHorasResumo,
   resumoDia,
   ajustarPonto,
