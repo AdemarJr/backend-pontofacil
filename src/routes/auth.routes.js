@@ -5,8 +5,8 @@ const {
   loginEmail,
   loginPin,
   refreshToken,
-  esqueciSenha,
-  redefinirSenha,
+  esqueciSenhaSupabase,
+  redefinirSenhaSupabase,
 } = require('../controllers/auth.controller');
 
 const forgotLimiter = rateLimit({
@@ -28,7 +28,8 @@ const resetLimiter = rateLimit({
 router.post('/login', loginEmail);
 router.post('/login-pin', loginPin);
 router.post('/refresh', refreshToken);
-router.post('/forgot-password', forgotLimiter, esqueciSenha);
-router.post('/reset-password', resetLimiter, redefinirSenha);
+// Password recovery via Supabase Auth (avoids Railway SMTP egress blocking)
+router.post('/forgot-password', forgotLimiter, esqueciSenhaSupabase);
+router.post('/reset-password', resetLimiter, redefinirSenhaSupabase);
 
 module.exports = router;

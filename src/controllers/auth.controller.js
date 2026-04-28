@@ -2,7 +2,8 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
-const { requestForgotByEmail, resetPasswordWithToken } = require('../services/passwordReset.service');
+const { requestForgotByEmail, resetPasswordWithToken, frontendBase } = require('../services/passwordReset.service');
+const { sendPasswordResetEmail, updatePasswordWithToken } = require('../services/supabaseAuth.service');
 
 const prisma = new PrismaClient();
 
@@ -215,4 +216,72 @@ async function redefinirSenha(req, res, next) {
   }
 }
 
-module.exports = { loginEmail, loginPin, refreshToken, esqueciSenha, redefinirSenha };
+/**
+ * POST /api/auth/forgot-password
+ * Triggers Supabase Auth to send a password-reset email.
+ * Does not reveal whether the address exists in Supabase.
+ */
+async function esqueciSenhaSupabase(req, res, next) {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return res.status(400).json({ error: 'E-mail é obrigatório.' });
+    }
+
+    const redirectTo = `${frontendBase()}/redefinir-senha`;
+
+    try {
+      await sendPasswordResetEmail(email.trim().toLowerCase(), redirectTo);
+    } catch (e) {
+      if (e.code === 'SUPABASE_NOT_CONFIGURED') {
+        console.error('[SUPABASE_AUTH] Variáveis de ambiente ausentes:', e.message);
+        return res.status(500).json({ error: e.message, code: e.code });
+      }
+      // For other Supabase errors we still return a generic success to avoid
+      // leaking whether an address is registered.
+      console.error('[SUPABASE_AUTH] Falha ao enviar e-mail de reset:', e.message);
+    }
+
+    return res.json({
+      mensagem:
+        'Se encontrarmos uma conta para este e-mail, enviaremos instruções para redefinir a senha. Verifique a caixa de entrada e o spam.',
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * POST /api/auth/reset-password
+ * Receives the Supabase access token (from the reset link) and the new password,
+ * then updates the user's password via Supabase Auth.
+ */
+async function redefinirSenhaSupabase(req, res, next) {
+  try {
+    const { token, senha } = req.body;
+
+    try {
+      await updatePasswordWithToken(token, senha);
+    } catch (e) {
+      if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+      throw e;
+    }
+
+    return res.json({
+      sucesso: true,
+      mensagem: 'Senha atualizada com sucesso. Você já pode entrar com a nova senha.',
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+module.exports = {
+  loginEmail,
+  loginPin,
+  refreshToken,
+  esqueciSenha,
+  redefinirSenha,
+  esqueciSenhaSupabase,
+  redefinirSenhaSupabase,
+};
