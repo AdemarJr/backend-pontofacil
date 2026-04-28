@@ -261,7 +261,23 @@ async function redefinirSenhaSupabase(req, res, next) {
     const { token, senha } = req.body;
 
     try {
-      await updatePasswordWithToken(token, senha);
+      const r = await updatePasswordWithToken(token, senha);
+
+      // Mantém o banco local (Prisma) sincronizado com a senha do Supabase,
+      // pois o login do sistema ainda valida `senhaHash`/`pinHash`.
+      if (r?.email) {
+        const senhaHash = await bcrypt.hash(String(senha), 12);
+        await Promise.all([
+          prisma.usuario.updateMany({
+            where: { email: r.email, ativo: true },
+            data: { senhaHash },
+          }),
+          prisma.superAdmin.updateMany({
+            where: { email: r.email, ativo: true },
+            data: { senhaHash },
+          }),
+        ]);
+      }
     } catch (e) {
       if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
       throw e;

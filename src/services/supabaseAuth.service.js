@@ -27,6 +27,57 @@ function getSupabaseClient() {
   });
 }
 
+function getSupabaseAdminClient() {
+  const url = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SECRET_KEY;
+  if (!url || !serviceKey) {
+    const err = new Error('SUPABASE_URL e SUPABASE_SECRET_KEY devem estar configurados para operações admin.');
+    err.status = 500;
+    err.code = 'SUPABASE_NOT_CONFIGURED';
+    throw err;
+  }
+  return createClient(url, serviceKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  });
+}
+
+/**
+ * Ensures a Supabase Auth user exists for the given email.
+ * This is required because `resetPasswordForEmail` only sends an email if the user exists.
+ */
+async function ensureSupabaseUserExists(email, userMetadata = {}) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!e) {
+    const err = new Error('E-mail é obrigatório.');
+    err.status = 400;
+    throw err;
+  }
+
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase.auth.admin.createUser({
+    email: e,
+    email_confirm: true,
+    user_metadata: userMetadata && typeof userMetadata === 'object' ? userMetadata : {},
+  });
+
+  if (error) {
+    const msg = String(error.message || '');
+    // Supabase returns variations like "User already registered" depending on version.
+    if (/already\s+registered|already\s+exists|User\s+already/i.test(msg)) {
+      return { created: false };
+    }
+    const err = new Error(msg || 'Falha ao criar usuário no Supabase Auth.');
+    err.status = 502;
+    err.code = 'SUPABASE_ADMIN_CREATE_ERROR';
+    throw err;
+  }
+
+  return { created: true, userId: data?.user?.id || null };
+}
+
 /**
  * Triggers Supabase to send a password-reset email to the given address.
  * Supabase handles the email delivery — no SMTP required on our side.
@@ -64,7 +115,7 @@ async function sendPasswordResetEmail(email, redirectTo) {
  *
  * @param {string} accessToken  Token from the Supabase reset link.
  * @param {string} newPassword  New password chosen by the user (min 6 chars).
- * @returns {Promise<void>}     Throws on invalid token or API error.
+ * @returns {Promise<{email: string | null}>}  Throws on invalid token or API error.
  */
 async function updatePasswordWithToken(accessToken, newPassword) {
   if (!accessToken || typeof accessToken !== 'string') {
@@ -104,6 +155,15 @@ async function updatePasswordWithToken(accessToken, newPassword) {
 
   console.log('[SUPABASE_AUTH] Atualizando senha do usuário via token de reset...');
 
+  // We fetch the user first so the controller can sync the local DB (Prisma) by email.
+  let email = null;
+  try {
+    const { data, error } = await supabase.auth.getUser();
+    if (!error) email = data?.user?.email || null;
+  } catch {
+    // ignore (best-effort)
+  }
+
   const { error } = await supabase.auth.updateUser({ password: newPassword });
 
   if (error) {
@@ -117,6 +177,7 @@ async function updatePasswordWithToken(accessToken, newPassword) {
   }
 
   console.log('[SUPABASE_AUTH] Senha atualizada com sucesso via Supabase Auth.');
+  return { email };
 }
 
 /**
@@ -257,4 +318,9 @@ async function sendNewManagerInviteEmail(email, nome, nomeEmpresa) {
   console.log(`[SUPABASE_AUTH] Convite de gerente enviado com sucesso para: ${email}`);
 }
 
-module.exports = { sendPasswordResetEmail, updatePasswordWithToken, sendNewManagerInviteEmail };
+module.exports = {
+  sendPasswordResetEmail,
+  updatePasswordWithToken,
+  sendNewManagerInviteEmail,
+  ensureSupabaseUserExists,
+};

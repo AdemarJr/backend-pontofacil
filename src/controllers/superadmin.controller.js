@@ -2,14 +2,10 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
-const { sendConviteUsuario } = require('../services/passwordReset.service');
+const { frontendBase } = require('../services/passwordReset.service');
+const { sendPasswordResetEmail, ensureSupabaseUserExists } = require('../services/supabaseAuth.service');
 
 const prisma = new PrismaClient();
-
-function gerarSenhaTemporaria() {
-  // senha numérica 6 dígitos (compatível com a validação de senha>=6)
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
 
 async function listarTenants(req, res, next) {
   try {
@@ -89,8 +85,15 @@ async function criarTenant(req, res, next) {
     let conviteAdminEnviado = false;
     if (!comSenha) {
       try {
-        const r = await sendConviteUsuario(resultado.admin.id);
-        conviteAdminEnviado = Boolean(r.ok && !r.skipped);
+        // Garante que exista um usuário no Supabase Auth e dispara o e-mail de recuperação
+        await ensureSupabaseUserExists(adminEmailNorm, {
+          nome: resultado.admin.nome,
+          role: 'ADMIN',
+          tenantId: resultado.tenant.id,
+        });
+        const redirectTo = `${frontendBase()}/redefinir-senha`;
+        await sendPasswordResetEmail(adminEmailNorm, redirectTo);
+        conviteAdminEnviado = true;
       } catch (e) {
         console.error('[superadmin/criarTenant] Convite falhou (empresa já criada):', e?.message || e);
         conviteAdminEnviado = false;
@@ -199,8 +202,14 @@ async function criarAdminTenant(req, res, next) {
     let conviteEmailEnviado = false;
     if (!comSenha) {
       try {
-        const r = await sendConviteUsuario(usuario.id);
-        conviteEmailEnviado = Boolean(r.ok && !r.skipped);
+        await ensureSupabaseUserExists(usuario.email, {
+          nome: usuario.nome,
+          role: 'ADMIN',
+          tenantId,
+        });
+        const redirectTo = `${frontendBase()}/redefinir-senha`;
+        await sendPasswordResetEmail(usuario.email, redirectTo);
+        conviteEmailEnviado = true;
       } catch (e) {
         console.error('[superadmin/criarAdmin] Convite falhou (admin já criado):', e?.message || e);
         conviteEmailEnviado = false;
@@ -218,13 +227,11 @@ async function criarAdminTenant(req, res, next) {
 
 /**
  * Resetar senha (PIN) de um ADMIN da empresa.
- * Retorna a senha temporária em texto para o Super Admin repassar ao cliente.
+ * Dispara e-mail de recuperação via Supabase (Reset password).
  */
 async function resetSenhaAdminTenant(req, res, next) {
   try {
     const { id: tenantId, adminId } = req.params;
-    const senhaTemp = gerarSenhaTemporaria();
-    const pinHash = await bcrypt.hash(senhaTemp, 12);
 
     const usuario = await prisma.usuario.findFirst({
       where: { id: adminId, tenantId, role: 'ADMIN' },
@@ -234,19 +241,23 @@ async function resetSenhaAdminTenant(req, res, next) {
       return res.status(404).json({ error: 'Administrador não encontrado para esta empresa' });
     }
 
-    await prisma.usuario.update({
-      where: { id: adminId },
-      data: {
-        pinHash,
-        senhaHash: pinHash,
-        passwordResetToken: null,
-        passwordResetExpires: null,
-      },
-    });
+    try {
+      await ensureSupabaseUserExists(usuario.email, {
+        nome: usuario.nome,
+        role: 'ADMIN',
+        tenantId,
+      });
+      const redirectTo = `${frontendBase()}/redefinir-senha`;
+      await sendPasswordResetEmail(usuario.email, redirectTo);
+    } catch (e) {
+      if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+      throw e;
+    }
 
     return res.json({
       usuario,
-      senhaTemporaria: senhaTemp,
+      sucesso: true,
+      emailEnviado: true,
     });
   } catch (err) {
     next(err);
