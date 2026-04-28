@@ -9,6 +9,7 @@ const prisma = new PrismaClient();
 
 const LIMITE_PENDENCIA_MODAL_HORAS = 12;
 const LIMITE_TURNO_MAX_HORAS = 16;
+const COOLDOWN_BATIDA_SEGUNDOS = 15;
 
 // Avisos de "registro cedo demais" (não impedem se o usuário confirmar).
 // Mantemos no backend para ficar consistente entre dispositivos.
@@ -23,6 +24,11 @@ function diffHoras(a, b) {
 function diffMinutos(a, b) {
   const ms = Math.abs(new Date(a).getTime() - new Date(b).getTime());
   return ms / (1000 * 60);
+}
+
+function diffSegundos(a, b) {
+  const ms = Math.abs(new Date(a).getTime() - new Date(b).getTime());
+  return ms / 1000;
 }
 
 function inicioFimDoDia(date = new Date()) {
@@ -345,6 +351,24 @@ async function registrar(req, res, next) {
     const proximoEsperado = ultimoEhHoje ? determinarProximoTipo(ultimo?.tipo) : 'ENTRADA';
     const ultimoAbreCiclo = Boolean(ultimo) && ultimo.tipo !== 'SAIDA';
     const horasDesdeUltimo = ultimo ? diffHoras(agora, ultimo.dataHora) : 0;
+    const segundosDesdeUltimo = ultimo ? diffSegundos(agora, ultimo.dataHora) : 0;
+
+    // ---- BLOQUEIO: batida seguida / duplo-clique / reenvio rápido ----
+    // Mesmo com a sequência correta, um toque duplo ou retry pode gerar marcações em sequência.
+    // Protegemos com um cooldown curto para qualquer tipo de registro.
+    if (ultimo?.id && segundosDesdeUltimo < COOLDOWN_BATIDA_SEGUNDOS) {
+      return res.status(409).json({
+        error: 'Registro muito próximo do anterior. Aguarde alguns segundos e tente novamente.',
+        code: 'REGISTRO_MUITO_RAPIDO',
+        cooldownSegundos: COOLDOWN_BATIDA_SEGUNDOS,
+        segundosDecorridos: Math.max(0, Math.round(segundosDesdeUltimo)),
+        ultimo: {
+          registroId: ultimo.id,
+          tipo: ultimo.tipo,
+          dataHora: ultimo.dataHora,
+        },
+      });
+    }
 
     // Se virou o dia e ontem ficou "em aberto", permitimos iniciar o dia normalmente (ENTRADA),
     // mas sinalizamos pendência para o administrativo ajustar o dia anterior.
