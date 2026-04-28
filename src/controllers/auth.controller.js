@@ -3,7 +3,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
 const { requestForgotByEmail, resetPasswordWithToken, frontendBase } = require('../services/passwordReset.service');
-const { sendPasswordResetEmail, updatePasswordWithToken } = require('../services/supabaseAuth.service');
+const { sendPasswordResetEmail, updatePasswordWithToken, sendNewManagerInviteEmail } = require('../services/supabaseAuth.service');
 
 const prisma = new PrismaClient();
 
@@ -276,6 +276,44 @@ async function redefinirSenhaSupabase(req, res, next) {
   }
 }
 
+/**
+ * POST /api/auth/send-manager-invite
+ * Sends a welcome/invitation email to a newly created manager or account owner.
+ * Requires an authenticated admin or super-admin user (enforced via middleware).
+ *
+ * Body: { email: string, nome: string, nomeEmpresa: string }
+ */
+async function enviarConviteGerente(req, res, next) {
+  try {
+    const { email, nome, nomeEmpresa } = req.body;
+
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return res.status(400).json({ error: 'E-mail é obrigatório.' });
+    }
+    if (!nome || typeof nome !== 'string' || !nome.trim()) {
+      return res.status(400).json({ error: 'Nome do gerente é obrigatório.' });
+    }
+
+    try {
+      await sendNewManagerInviteEmail(
+        email.trim().toLowerCase(),
+        nome.trim(),
+        nomeEmpresa ? String(nomeEmpresa).trim() : ''
+      );
+    } catch (e) {
+      if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+      throw e;
+    }
+
+    return res.json({
+      sucesso: true,
+      mensagem: `Convite enviado com sucesso para ${email.trim().toLowerCase()}.`,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   loginEmail,
   loginPin,
@@ -284,4 +322,5 @@ module.exports = {
   redefinirSenha,
   esqueciSenhaSupabase,
   redefinirSenhaSupabase,
+  enviarConviteGerente,
 };
