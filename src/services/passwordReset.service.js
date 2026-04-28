@@ -7,7 +7,20 @@ const { decryptPin } = require('../utils/pinCrypto');
 const prisma = new PrismaClient();
 
 function frontendBase() {
-  return (process.env.FRONTEND_URL || 'https://pontofacil.digital').replace(/\/$/, '');
+  const raw = String(process.env.FRONTEND_URL || '').trim();
+  const fallback = 'https://pontofacil.digital';
+
+  // Em produção, precisamos do FRONTEND_URL correto para o redirect_to do Supabase
+  // e para qualquer link que saia do backend. Evita enviar e-mails com localhost.
+  if (!raw) {
+    if (process.env.NODE_ENV === 'production') {
+      const err = new Error('FRONTEND_URL é obrigatório em produção (ex.: https://app.seudominio.com)');
+      err.status = 500;
+      throw err;
+    }
+    return fallback;
+  }
+  return raw.replace(/\/$/, '');
 }
 
 function resetExpiresHours() {
@@ -83,57 +96,90 @@ async function sendConviteUsuario(userId) {
 
   const isColaborador = u.role === 'COLABORADOR';
   const tituloAcesso = isColaborador ? 'Meu Ponto (colaborador)' : 'Painel (admin/gerente)';
-  const subject = `PontoFácil — defina sua senha de acesso (${empresa})`;
+  const subject = `PontoFácil — seu acesso (${empresa})`;
+  const loginUrl = `${frontendBase()}/login`;
+  const expiresTxt = `${resetExpiresHours()} horas`;
+  const pinText = pin
+    ? [`PIN do totem: ${pin}`]
+    : [
+        'PIN do totem: informado pelo administrador.',
+        '(Por segurança, este servidor está configurado para não enviar PIN por e-mail.)',
+      ];
+
   const text = [
-    `Olá, ${u.nome}.`,
+    `Olá, ${u.nome}!`,
     '',
-    `Você foi cadastrado no PontoFácil (${empresa}).`,
-    'Defina uma senha para acessar o sistema pelo navegador (login em ' + frontendBase() + '/login).',
-    '',
-    `Acesso: ${tituloAcesso}`,
-    `Link para bater ponto (Meu Ponto): ${linkMeuPonto}`,
-    `E-mail de login: ${emailLogin}`,
-    ...(pin ? [`PIN do totem: ${pin}`] : []),
-    ...(pin
-      ? ['']
-      : [
-          'PIN do totem: informado pelo administrador.',
-          '(Por segurança, este servidor está configurado para não enviar PIN por e-mail.)',
-        ]),
+    `Bem-vindo(a) ao PontoFácil (${empresa}).`,
+    'Para concluir seu cadastro, defina sua senha de acesso pelo link abaixo:',
     '',
     link,
     '',
-    `Este link expira em aproximadamente ${resetExpiresHours()} horas.`,
+    `Este link expira em cerca de ${expiresTxt}.`,
     '',
-    'Como usar (bem simples):',
-    `1) Acesse ${frontendBase()}/login`,
-    '2) Entre com seu e-mail e a senha que você vai criar no link acima',
-    `3) Para bater ponto: abra ${linkMeuPonto} e registre normalmente`,
+    'Seus dados de acesso:',
+    `- Perfil: ${tituloAcesso}`,
+    `- E-mail (login): ${emailLogin}`,
+    ...pinText.map((x) => `- ${x}`),
     '',
-    'Se você não reconhece este cadastro, ignore este e-mail.',
+    'Links úteis:',
+    `- Login: ${loginUrl}`,
+    `- Meu Ponto: ${linkMeuPonto}`,
+    '',
+    'Se você não solicitou esse acesso, pode ignorar este e-mail.',
   ].join('\n');
 
   const html = `
-    <p>Olá, <strong>${escHtml(u.nome)}</strong>.</p>
-    <p>Você foi cadastrado no <strong>PontoFácil</strong> (${escHtml(empresa)}).</p>
-    <p>Clique no botão abaixo para <strong>definir sua senha de acesso</strong>.</p>
-    <p><a href="${link}" style="display:inline-block;padding:12px 20px;background:#1D9E75;color:#fff;text-decoration:none;border-radius:8px;">Definir minha senha</a></p>
-    <p style="font-size:13px;color:#666;">Ou copie o link: <br/><span style="word-break:break-all">${escHtml(link)}</span></p>
-    <hr style="border:none;border-top:1px solid #eee;margin:18px 0;" />
-    <p><strong>Link para bater ponto (Meu Ponto):</strong><br/><a href="${linkMeuPonto}">${escHtml(linkMeuPonto)}</a></p>
-    <p><strong>E-mail de login:</strong> ${escHtml(emailLogin)}</p>
-    ${
-      pin
-        ? `<p><strong>PIN do totem:</strong> ${escHtml(pin)}</p>`
-        : `<p style="font-size:13px;color:#666;"><strong>PIN do totem:</strong> informado pelo administrador (não enviamos por e-mail).</p>`
-    }
-    <p style="font-size:13px;color:#666;line-height:1.5;">
-      <strong>Como usar:</strong><br/>
-      1) Acesse <a href="${frontendBase()}/login">${escHtml(frontendBase())}/login</a><br/>
-      2) Entre com seu e-mail e a senha que você criou<br/>
-      3) Para bater ponto, abra o Meu Ponto e registre normalmente
-    </p>
-    <p style="font-size:13px;color:#666;">Link para criar senha expira em cerca de ${resetExpiresHours()} horas.</p>
+    <div style="background:#f6f7f9;padding:24px 12px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
+      <div style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #e8eaee;border-radius:12px;overflow:hidden;">
+        <div style="padding:18px 20px;background:linear-gradient(135deg,#1D9E75 0%,#085041 100%);color:#fff;">
+          <div style="font-weight:800;letter-spacing:0.2px;font-size:18px;">PontoFácil</div>
+          <div style="opacity:0.95;font-size:13px;margin-top:2px;">Acesso — ${escHtml(empresa)}</div>
+        </div>
+        <div style="padding:22px 20px;color:#111827;">
+          <p style="margin:0 0 10px 0;font-size:15px;">Olá, <strong>${escHtml(u.nome)}</strong>!</p>
+          <p style="margin:0 0 14px 0;font-size:14px;line-height:1.55;color:#374151;">
+            Você foi cadastrado(a) no <strong>PontoFácil</strong>. Para concluir o primeiro acesso, crie sua senha clicando no botão abaixo.
+          </p>
+          <p style="margin:16px 0;">
+            <a href="${link}" style="display:inline-block;padding:12px 16px;background:#1D9E75;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">
+              Definir minha senha
+            </a>
+          </p>
+          <p style="margin:0 0 14px 0;font-size:12.5px;line-height:1.55;color:#6b7280;">
+            Este link expira em cerca de <strong>${escHtml(expiresTxt)}</strong>.
+          </p>
+          <div style="border-top:1px solid #eef0f3;margin:18px 0;"></div>
+          <div style="font-size:13.5px;line-height:1.6;color:#111827;">
+            <div style="font-weight:800;margin-bottom:6px;">Seus dados de acesso</div>
+            <div><strong>Perfil:</strong> ${escHtml(tituloAcesso)}</div>
+            <div><strong>E-mail (login):</strong> ${escHtml(emailLogin)}</div>
+            ${
+              pin
+                ? `<div><strong>PIN do totem:</strong> ${escHtml(pin)}</div>`
+                : `<div style="color:#6b7280;"><strong>PIN do totem:</strong> informado pelo administrador (não enviamos por e-mail).</div>`
+            }
+          </div>
+          <div style="border-top:1px solid #eef0f3;margin:18px 0;"></div>
+          <div style="font-size:13.5px;line-height:1.7;">
+            <div style="font-weight:800;margin-bottom:6px;">Links úteis</div>
+            <div><strong>Login:</strong> <a href="${loginUrl}">${escHtml(loginUrl)}</a></div>
+            <div><strong>Meu Ponto:</strong> <a href="${linkMeuPonto}">${escHtml(linkMeuPonto)}</a></div>
+          </div>
+          <div style="margin-top:18px;padding:12px 12px;background:#f9fafb;border:1px solid #eef0f3;border-radius:10px;">
+            <div style="font-size:12.5px;color:#6b7280;line-height:1.55;">
+              Se o botão não abrir, copie e cole este link no navegador:<br/>
+              <span style="word-break:break-all;color:#374151;">${escHtml(link)}</span>
+            </div>
+          </div>
+          <p style="margin:16px 0 0 0;font-size:12.5px;color:#6b7280;line-height:1.55;">
+            Se você não reconhece este acesso, ignore este e-mail.
+          </p>
+        </div>
+      </div>
+      <div style="max-width:560px;margin:10px auto 0 auto;font-size:11.5px;color:#9ca3af;line-height:1.4;text-align:center;">
+        Enviado automaticamente por PontoFácil.
+      </div>
+    </div>
   `;
 
   const r = await sendMail({ to: u.email, subject, text, html });
