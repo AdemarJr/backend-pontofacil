@@ -183,42 +183,61 @@ async function updatePasswordWithToken(accessToken, newPassword) {
     throw err;
   }
 
-  // Create a client pre-seeded with the user's session token so updateUser
-  // acts on behalf of that user.
-  const supabase = createClient(url, key, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-    global: {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    },
-  });
+  // Alguns ambientes retornam "Auth session missing!" quando usamos supabase-js sem sessão persistida.
+  // Para ser determinístico, chamamos diretamente a API do GoTrue com Authorization Bearer <access_token>.
+  const base = String(url).replace(/\/$/, '');
+  const token = String(accessToken).trim();
+  const apikey = String(key).trim();
 
-  console.log('[SUPABASE_AUTH] Atualizando senha do usuário via token de reset...');
+  console.log('[SUPABASE_AUTH] Atualizando senha via GoTrue /auth/v1/user ...');
 
-  // We fetch the user first so the controller can sync the local DB (Prisma) by email.
+  // Best-effort: pega e-mail antes, para sincronizar o Prisma.
   let email = null;
   try {
-    const { data, error } = await supabase.auth.getUser();
-    if (!error) email = data?.user?.email || null;
+    const resUser = await fetch(`${base}/auth/v1/user`, {
+      method: 'GET',
+      headers: {
+        apikey,
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (resUser.ok) {
+      const j = await resUser.json();
+      email = j?.email || null;
+    }
   } catch {
-    // ignore (best-effort)
+    // ignore
   }
 
-  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  const res = await fetch(`${base}/auth/v1/user`, {
+    method: 'PUT',
+    headers: {
+      apikey,
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ password: String(newPassword) }),
+  });
 
-  if (error) {
-    console.error('[SUPABASE_AUTH] Erro ao atualizar senha:', error.message);
-    const err = new Error(
-      error.message || 'Token inválido ou expirado. Solicite uma nova recuperação de senha.'
-    );
-    err.status = 400;
+  if (!res.ok) {
+    let msg = `Falha ao atualizar senha (status ${res.status}).`;
+    try {
+      const j = await res.json();
+      if (j?.msg) msg = String(j.msg);
+      if (j?.message) msg = String(j.message);
+      if (j?.error_description) msg = String(j.error_description);
+      if (j?.error) msg = String(j.error);
+    } catch {
+      // ignore
+    }
+    console.error('[SUPABASE_AUTH] Erro ao atualizar senha (GoTrue):', msg);
+    const err = new Error(msg || 'Token inválido ou expirado. Solicite uma nova recuperação de senha.');
+    err.status = res.status === 401 || res.status === 403 ? 400 : 502;
     err.code = 'SUPABASE_UPDATE_ERROR';
     throw err;
   }
 
-  console.log('[SUPABASE_AUTH] Senha atualizada com sucesso via Supabase Auth.');
+  console.log('[SUPABASE_AUTH] Senha atualizada com sucesso (GoTrue).');
   return { email };
 }
 
