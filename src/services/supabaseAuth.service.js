@@ -102,6 +102,8 @@ async function sendFirstAccessInviteEmail(email, redirectTo, userMetadata = {}) 
   }
 
   const supabase = getSupabaseAdminClient();
+  console.log(`[SUPABASE_AUTH] Enviando convite (primeiro acesso) para: ${e}`);
+  console.log(`[SUPABASE_AUTH] redirectTo (invite): ${r}`);
   const { data, error } = await supabase.auth.admin.inviteUserByEmail(e, {
     redirectTo: r,
     data: userMetadata && typeof userMetadata === 'object' ? userMetadata : {},
@@ -129,6 +131,7 @@ async function sendPasswordResetEmail(email, redirectTo) {
   const supabase = getSupabaseClient();
 
   console.log(`[SUPABASE_AUTH] Solicitando reset de senha para: ${email}`);
+  console.log(`[SUPABASE_AUTH] redirectTo (recovery): ${redirectTo}`);
 
   const { error } = await supabase.auth.resetPasswordForEmail(email, {
     redirectTo,

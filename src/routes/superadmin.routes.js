@@ -6,6 +6,7 @@ const {
   criarTenant,
   criarAdminTenant,
   resetSenhaAdminTenant,
+  reenviarConviteAdminTenant,
   atualizarTenant,
   atualizarStatus,
   stats,
@@ -18,6 +19,7 @@ router.get('/tenants', listarTenants);
 router.post('/tenants', criarTenant);
 router.post('/tenants/:id/admin', criarAdminTenant);
 router.post('/tenants/:id/admin/:adminId/reset-senha', resetSenhaAdminTenant);
+router.post('/tenants/:id/admin/:adminId/reenviar-convite', reenviarConviteAdminTenant);
 router.put('/tenants/:id', atualizarTenant);
 router.put('/tenants/:id/status', atualizarStatus);
 router.post('/tenants/:id/limpar-registros', limparRegistrosTenant);

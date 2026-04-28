@@ -83,6 +83,7 @@ async function criarTenant(req, res, next) {
     });
 
     let conviteAdminEnviado = false;
+    let conviteAdminErro = null;
     if (!comSenha) {
       try {
         const redirectTo = `${frontendBase()}/redefinir-senha`;
@@ -95,12 +96,14 @@ async function criarTenant(req, res, next) {
       } catch (e) {
         console.error('[superadmin/criarTenant] Convite falhou (empresa já criada):', e?.message || e);
         conviteAdminEnviado = false;
+        conviteAdminErro = e?.message ? String(e.message) : 'Falha ao enviar convite';
       }
     }
 
     res.status(201).json({
       ...resultado.tenant,
       conviteAdminEnviado,
+      ...(conviteAdminErro ? { conviteAdminErro } : {}),
       primeiroAcessoPorEmail: !comSenha,
     });
   } catch (err) {
@@ -198,6 +201,7 @@ async function criarAdminTenant(req, res, next) {
     });
 
     let conviteEmailEnviado = false;
+    let conviteEmailErro = null;
     if (!comSenha) {
       try {
         const redirectTo = `${frontendBase()}/redefinir-senha`;
@@ -210,10 +214,16 @@ async function criarAdminTenant(req, res, next) {
       } catch (e) {
         console.error('[superadmin/criarAdmin] Convite falhou (admin já criado):', e?.message || e);
         conviteEmailEnviado = false;
+        conviteEmailErro = e?.message ? String(e.message) : 'Falha ao enviar convite';
       }
     }
 
-    res.status(201).json({ ...usuario, conviteEmailEnviado, primeiroAcessoPorEmail: !comSenha });
+    res.status(201).json({
+      ...usuario,
+      conviteEmailEnviado,
+      ...(conviteEmailErro ? { conviteEmailErro } : {}),
+      primeiroAcessoPorEmail: !comSenha,
+    });
   } catch (err) {
     if (err.code === 'P2002') {
       return res.status(409).json({ error: 'E-mail já cadastrado nesta empresa' });
@@ -307,11 +317,35 @@ async function limparRegistrosTenant(req, res, next) {
   }
 }
 
+/** Reenviar convite de primeiro acesso (Supabase Invite) para um ADMIN */
+async function reenviarConviteAdminTenant(req, res, next) {
+  try {
+    const { id: tenantId, adminId } = req.params;
+    const u = await prisma.usuario.findFirst({
+      where: { id: adminId, tenantId, role: 'ADMIN', ativo: true },
+      select: { id: true, nome: true, email: true },
+    });
+    if (!u) return res.status(404).json({ error: 'Administrador não encontrado para esta empresa' });
+
+    const redirectTo = `${frontendBase()}/redefinir-senha`;
+    await sendFirstAccessInviteEmail(u.email, redirectTo, {
+      nome: u.nome,
+      role: 'ADMIN',
+      tenantId,
+    });
+
+    return res.json({ sucesso: true, emailEnviado: true, usuario: u });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
   listarTenants,
   criarTenant,
   criarAdminTenant,
   resetSenhaAdminTenant,
+  reenviarConviteAdminTenant,
   atualizarTenant,
   atualizarStatus,
   stats,
