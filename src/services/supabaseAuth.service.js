@@ -79,6 +79,45 @@ async function ensureSupabaseUserExists(email, userMetadata = {}) {
 }
 
 /**
+ * Sends an invitation / first access email via Supabase Auth (Invite user).
+ * This is the recommended flow for creating a new company + manager/admin and
+ * having the recipient set their password securely.
+ *
+ * @param {string} email
+ * @param {string} redirectTo
+ * @param {object} userMetadata
+ */
+async function sendFirstAccessInviteEmail(email, redirectTo, userMetadata = {}) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!e) {
+    const err = new Error('E-mail é obrigatório.');
+    err.status = 400;
+    throw err;
+  }
+  const r = String(redirectTo || '').trim();
+  if (!r) {
+    const err = new Error('redirectTo é obrigatório.');
+    err.status = 400;
+    throw err;
+  }
+
+  const supabase = getSupabaseAdminClient();
+  const { data, error } = await supabase.auth.admin.inviteUserByEmail(e, {
+    redirectTo: r,
+    data: userMetadata && typeof userMetadata === 'object' ? userMetadata : {},
+  });
+
+  if (error) {
+    const err = new Error(error.message || 'Falha ao enviar convite (primeiro acesso) via Supabase.');
+    err.status = 502;
+    err.code = 'SUPABASE_INVITE_ERROR';
+    throw err;
+  }
+
+  return { ok: true, userId: data?.user?.id || null };
+}
+
+/**
  * Triggers Supabase to send a password-reset email to the given address.
  * Supabase handles the email delivery — no SMTP required on our side.
  *
@@ -323,4 +362,5 @@ module.exports = {
   updatePasswordWithToken,
   sendNewManagerInviteEmail,
   ensureSupabaseUserExists,
+  sendFirstAccessInviteEmail,
 };

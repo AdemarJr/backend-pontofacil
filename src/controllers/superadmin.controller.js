@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 const { frontendBase } = require('../services/passwordReset.service');
-const { sendPasswordResetEmail, ensureSupabaseUserExists } = require('../services/supabaseAuth.service');
+const { sendPasswordResetEmail, sendFirstAccessInviteEmail } = require('../services/supabaseAuth.service');
 
 const prisma = new PrismaClient();
 
@@ -85,14 +85,12 @@ async function criarTenant(req, res, next) {
     let conviteAdminEnviado = false;
     if (!comSenha) {
       try {
-        // Garante que exista um usuário no Supabase Auth e dispara o e-mail de recuperação
-        await ensureSupabaseUserExists(adminEmailNorm, {
+        const redirectTo = `${frontendBase()}/redefinir-senha`;
+        await sendFirstAccessInviteEmail(adminEmailNorm, redirectTo, {
           nome: resultado.admin.nome,
           role: 'ADMIN',
           tenantId: resultado.tenant.id,
         });
-        const redirectTo = `${frontendBase()}/redefinir-senha`;
-        await sendPasswordResetEmail(adminEmailNorm, redirectTo);
         conviteAdminEnviado = true;
       } catch (e) {
         console.error('[superadmin/criarTenant] Convite falhou (empresa já criada):', e?.message || e);
@@ -202,13 +200,12 @@ async function criarAdminTenant(req, res, next) {
     let conviteEmailEnviado = false;
     if (!comSenha) {
       try {
-        await ensureSupabaseUserExists(usuario.email, {
+        const redirectTo = `${frontendBase()}/redefinir-senha`;
+        await sendFirstAccessInviteEmail(usuario.email, redirectTo, {
           nome: usuario.nome,
           role: 'ADMIN',
           tenantId,
         });
-        const redirectTo = `${frontendBase()}/redefinir-senha`;
-        await sendPasswordResetEmail(usuario.email, redirectTo);
         conviteEmailEnviado = true;
       } catch (e) {
         console.error('[superadmin/criarAdmin] Convite falhou (admin já criado):', e?.message || e);
@@ -242,11 +239,6 @@ async function resetSenhaAdminTenant(req, res, next) {
     }
 
     try {
-      await ensureSupabaseUserExists(usuario.email, {
-        nome: usuario.nome,
-        role: 'ADMIN',
-        tenantId,
-      });
       const redirectTo = `${frontendBase()}/redefinir-senha`;
       await sendPasswordResetEmail(usuario.email, redirectTo);
     } catch (e) {
