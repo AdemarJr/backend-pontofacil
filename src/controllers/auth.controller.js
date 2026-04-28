@@ -244,7 +244,7 @@ async function esqueciSenhaSupabase(req, res, next) {
 
     return res.json({
       mensagem:
-        'Se encontrarmos uma conta para este e-mail, enviaremos instruções para redefinir a senha. Verifique a caixa de entrada e o spam.',
+        'Verifique a caixa de entrada e o spam.',
     });
   } catch (err) {
     return next(err);
