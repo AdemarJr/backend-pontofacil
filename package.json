@@ -4,7 +4,7 @@
   "description": "Backend do sistema SaaS de Controle de Ponto Digital",
   "main": "src/server.js",
   "scripts": {
-    "postinstall": "prisma generate",
+    "postinstall": "npx prisma migrate deploy && npx prisma generate",
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "db:migrate": "npx prisma migrate dev",
