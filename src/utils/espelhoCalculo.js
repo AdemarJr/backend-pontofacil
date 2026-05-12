@@ -177,4 +177,5 @@ module.exports = {
   fmtTime,
   minutesBetween,
   pad2,
+  parseHoraMinutos,
 };

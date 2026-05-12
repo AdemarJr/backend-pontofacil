@@ -9,6 +9,7 @@ const {
   fmtHours,
   fmtTime,
   pad2,
+  parseHoraMinutos,
 } = require('../utils/espelhoCalculo');
 
 const prisma = new PrismaClient();
@@ -1062,10 +1063,24 @@ async function resumoDia(req, res, next) {
     const tenantId = req.tenantId;
     const hoje = new Date();
     const inicio = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
-    const fim = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate(), 23, 59, 59);
+    const fim = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate(), 23, 59, 59, 999);
     const diaIso = fmtDateISO(hoje);
+    const agoraMin = hoje.getHours() * 60 + hoje.getMinutes();
 
-    const [feriadoHoje, feriasHoje, colaboradoresAtivos, registrosHoje] = await Promise.all([
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { toleranciaMinutos: true },
+    });
+    const tol = tenant?.toleranciaMinutos ?? 5;
+
+    const [
+      feriadoHoje,
+      feriasRows,
+      colaboradoresAtivos,
+      registrosHoje,
+      comprovantesAprovados,
+      escalasAll,
+    ] = await Promise.all([
       prisma.feriado.findFirst({
         where: { tenantId, data: diaIso, suspendeExpediente: true },
         select: { id: true, nome: true },
@@ -1077,19 +1092,75 @@ async function resumoDia(req, res, next) {
           dataInicio: { lte: diaIso },
           dataFim: { gte: diaIso },
         },
-        select: { usuarioId: true },
+        include: {
+          usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
+        },
       }),
       prisma.usuario.findMany({
         where: { tenantId, ativo: true, role: 'COLABORADOR' },
-        select: { id: true, dataAdmissao: true, dataDemissao: true },
+        select: { id: true, nome: true, cargo: true, departamento: true, dataAdmissao: true, dataDemissao: true },
+        orderBy: { nome: 'asc' },
       }),
       prisma.registroPonto.findMany({
-        where: { tenantId, dataHora: { gte: inicio, lte: fim } },
-        select: { usuarioId: true, tipo: true, dataHora: true },
+        where: {
+          tenantId,
+          deletedAt: null,
+          OR: [
+            { ajuste: { is: null }, dataHora: { gte: inicio, lte: fim } },
+            { ajuste: { is: { dataHoraNova: { gte: inicio, lte: fim } } } },
+          ],
+        },
+        select: {
+          usuarioId: true,
+          tipo: true,
+          dataHora: true,
+          ajuste: { select: { dataHoraNova: true } },
+        },
+      }),
+      prisma.comprovanteAusencia.findMany({
+        where: {
+          tenantId,
+          status: 'APROVADO',
+          OR: [
+            { dataFim: null, dataReferencia: diaIso },
+            { dataFim: { not: null }, dataReferencia: { lte: diaIso }, dataFim: { gte: diaIso } },
+          ],
+        },
+        include: {
+          usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
+        },
+      }),
+      prisma.escala.findMany({
+        where: { tenantId, ativo: true },
+        orderBy: { updatedAt: 'desc' },
       }),
     ]);
 
-    const feriasSet = new Set((feriasHoje || []).map((f) => f.usuarioId));
+    const feriasSet = new Set((feriasRows || []).map((f) => f.usuarioId));
+
+    const escalasPorUsuario = {};
+    for (const e of escalasAll || []) {
+      if (!escalasPorUsuario[e.usuarioId]) escalasPorUsuario[e.usuarioId] = [];
+      escalasPorUsuario[e.usuarioId].push(e);
+    }
+
+    function esDiaUtil(uid) {
+      const lista = escalasPorUsuario[uid] || [];
+      if (!lista.length) {
+        const d = new Date(`${diaIso}T12:00:00`);
+        const dow = d.getDay();
+        return dow >= 1 && dow <= 5;
+      }
+      return escalaParaDia(lista, diaIso) != null;
+    }
+
+    function prazoEntradaMin(uid) {
+      const esc = escalaParaDia(escalasPorUsuario[uid] || [], diaIso);
+      const esp = esc ? parseHoraMinutos(esc.horaInicio) : 8 * 60;
+      if (esp == null) return 8 * 60 + tol;
+      return esp + tol;
+    }
+
     const elegiveis = colaboradoresAtivos.filter((u) => {
       const admOk = u.dataAdmissao ? fmtDateISO(u.dataAdmissao) <= diaIso : true;
       const naoDemitido = u.dataDemissao ? fmtDateISO(u.dataDemissao) >= diaIso : true;
@@ -1098,15 +1169,97 @@ async function resumoDia(req, res, next) {
 
     const totalColaboradores = elegiveis.length;
 
+    const effDh = (r) => (r.ajuste?.dataHoraNova ? r.ajuste.dataHoraNova : r.dataHora);
+    const registrosOrdenados = [...registrosHoje].sort((a, b) => new Date(effDh(a)) - new Date(effDh(b)));
+
     const presentes = new Set();
-    const ausentes = new Set();
-    for (const r of registrosHoje) {
+    const sairam = new Set();
+    for (const r of registrosOrdenados) {
       if (r.tipo === 'ENTRADA' || r.tipo === 'RETORNO_ALMOCO') presentes.add(r.usuarioId);
       if (r.tipo === 'SAIDA') {
         presentes.delete(r.usuarioId);
-        ausentes.add(r.usuarioId);
+        sairam.add(r.usuarioId);
       }
     }
+
+    const pontosPorUsuario = {};
+    for (const r of registrosOrdenados) {
+      const uid = r.usuarioId;
+      if (!pontosPorUsuario[uid]) pontosPorUsuario[uid] = [];
+      pontosPorUsuario[uid].push({
+        tipo: r.tipo,
+        dataHora: effDh(r),
+      });
+    }
+
+    const colaboradorBasico = (u) => ({
+      id: u.id,
+      nome: u.nome,
+      cargo: u.cargo || '',
+      departamento: u.departamento || '',
+    });
+
+    const listaFerias = (feriasRows || []).map((f) => ({
+      ...colaboradorBasico(f.usuario),
+      dataInicio: f.dataInicio,
+      dataFim: f.dataFim,
+      observacao: f.observacao || null,
+    }));
+
+    const dispensadosIds = new Set();
+    const listaDispensados = [];
+    for (const c of comprovantesAprovados || []) {
+      if (dispensadosIds.has(c.usuarioId)) continue;
+      dispensadosIds.add(c.usuarioId);
+      listaDispensados.push({
+        ...colaboradorBasico(c.usuario),
+        dataReferencia: c.dataReferencia,
+        dataFim: c.dataFim,
+        descricao: c.descricao || null,
+      });
+    }
+
+    const listaPresentes = elegiveis.filter((u) => presentes.has(u.id)).map(colaboradorBasico);
+
+    const listaAusentes = [];
+    const listaFalta = [];
+    const listaAtrasados = [];
+
+    for (const u of elegiveis) {
+      if (!esDiaUtil(u.id)) continue;
+      if (dispensadosIds.has(u.id)) continue;
+
+      const pontos = pontosPorUsuario[u.id] || [];
+      const escalaDia = escalaParaDia(escalasPorUsuario[u.id] || [], diaIso);
+      const calc = calcularDia(pontos, { escala: escalaDia, toleranciaMinutos: tol, dataRef: diaIso });
+      const temEntrada = Boolean(calc.entrada);
+
+      if (temEntrada && calc.flags?.entradaAtrasada) {
+        listaAtrasados.push({
+          ...colaboradorBasico(u),
+          entradaEm: calc.entrada,
+          esperadoEntrada: calc.esperado?.entrada || null,
+        });
+      }
+
+      const noExpediente = presentes.has(u.id);
+      const finalizou = sairam.has(u.id);
+      if (!noExpediente && !finalizou) {
+        listaAusentes.push({ ...colaboradorBasico(u), esperadoEntrada: calc.esperado?.entrada || null });
+        if (!temEntrada && agoraMin > prazoEntradaMin(u.id)) {
+          listaFalta.push({ ...colaboradorBasico(u), esperadoEntrada: calc.esperado?.entrada || null });
+        }
+      }
+    }
+
+    const listaPayload = {
+      presentes: listaPresentes,
+      ausentes: listaAusentes,
+      atrasados: listaAtrasados,
+      falta: listaFalta,
+      ferias: listaFerias,
+      dispensados: listaDispensados,
+    };
 
     // Em feriado (suspende expediente), não faz sentido contar presença/ausência.
     if (feriadoHoje) {
@@ -1116,14 +1269,23 @@ async function resumoDia(req, res, next) {
         ausentes: 0,
         registrosHoje: registrosHoje.length,
         contextoDia: { feriado: { nome: feriadoHoje.nome } },
+        listas: {
+          presentes: [],
+          ausentes: [],
+          atrasados: [],
+          falta: [],
+          ferias: listaFerias,
+          dispensados: listaDispensados,
+        },
       });
     }
 
     res.json({
       totalColaboradores,
       presentes: presentes.size,
-      ausentes: totalColaboradores - presentes.size - ausentes.size,
+      ausentes: totalColaboradores - presentes.size - sairam.size,
       registrosHoje: registrosHoje.length,
+      listas: listaPayload,
     });
   } catch (err) {
     next(err);

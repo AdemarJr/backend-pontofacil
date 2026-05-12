@@ -179,6 +179,9 @@ model RegistroPonto {
   ipHash      String?
   userAgent   String?
 
+  // Idempotência (Meu Ponto / fila offline): mesma chave não cria duplicata
+  clientRequestId String?
+
   // Status
   validado    Boolean  @default(true)
   origem      OrigemPonto @default(TOTEM)
@@ -195,6 +198,7 @@ model RegistroPonto {
 
   @@index([tenantId, usuarioId])
   @@index([tenantId, dataHora])
+  @@unique([tenantId, usuarioId, clientRequestId], map: "registros_ponto_client_request_unique")
   @@map("registros_ponto")
 }
 

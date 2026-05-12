@@ -196,8 +196,17 @@ async function excluirRegistroAdmin(req, res, next) {
 // Registrar ponto (chamado pelo totem após foto)
 async function registrar(req, res, next) {
   try {
-    const { tipo, latitude, longitude, deviceId, fotoBase64, forcarNovoTurno, confirmarRegistroCurto } =
-      req.body;
+    const {
+      tipo,
+      latitude,
+      longitude,
+      deviceId,
+      fotoBase64,
+      forcarNovoTurno,
+      confirmarRegistroCurto,
+      clientRequestId,
+      dataHoraCapturada,
+    } = req.body;
     const usuarioId = req.usuario.id;
     const tenantId = req.tenantId || req.usuario.tenantId;
 
@@ -232,6 +241,51 @@ async function registrar(req, res, next) {
     }
     if (origem === 'APP_INDIVIDUAL' && tenant?.permitirMeuPonto === false) {
       return res.status(403).json({ error: 'Registro pelo meu-ponto está desativado para esta empresa' });
+    }
+
+    const agora = new Date();
+
+    // Idempotência: reenvio da fila offline / retry não duplica registro
+    if (origem === 'APP_INDIVIDUAL' && clientRequestId) {
+      const cid = String(clientRequestId).trim();
+      if (cid.length > 0 && cid.length <= 120) {
+        const existente = await prisma.registroPonto.findFirst({
+          where: { tenantId, usuarioId, clientRequestId: cid, deletedAt: null },
+          include: { usuario: { select: { nome: true, cargo: true } } },
+        });
+        if (existente) {
+          return res.status(200).json({
+            sucesso: true,
+            idempotente: true,
+            registro: {
+              id: existente.id,
+              tipo: existente.tipo,
+              dataHora: existente.dataHora,
+              usuario: existente.usuario.nome,
+            },
+            proximoTipo: determinarProximoTipo(existente.tipo),
+          });
+        }
+      }
+    }
+
+    let dataHoraRegistro = agora;
+    if (origem === 'APP_INDIVIDUAL' && dataHoraCapturada) {
+      const d = new Date(dataHoraCapturada);
+      if (!Number.isNaN(d.getTime())) {
+        const maxFuturo = new Date(agora.getTime() + 15 * 60 * 1000);
+        const minPassado = new Date(agora.getTime() - 14 * 24 * 60 * 60 * 1000);
+        if (d.getTime() <= maxFuturo.getTime() && d.getTime() >= minPassado.getTime()) {
+          dataHoraRegistro = d;
+        }
+      }
+    }
+    const refTime = dataHoraRegistro;
+
+    let clientReqIdDb = null;
+    if (origem === 'APP_INDIVIDUAL' && clientRequestId) {
+      const c = String(clientRequestId).trim();
+      if (c.length > 0 && c.length <= 120) clientReqIdDb = c;
     }
 
     // Valida geofence se ativo (cerca única legada ou múltiplos locais)
@@ -309,7 +363,7 @@ async function registrar(req, res, next) {
     // Evita problemas no relatório: não pode ter 2 entradas ou 2 saídas no mesmo dia, etc.
     // (admin pode corrigir ajustando horário do registro existente)
     {
-      const { inicio, fim } = inicioFimDoDia(new Date());
+      const { inicio, fim } = inicioFimDoDia(refTime);
       const jaExiste = await prisma.registroPonto.findFirst({
         where: {
           tenantId,
@@ -343,15 +397,14 @@ async function registrar(req, res, next) {
       select: { id: true, tipo: true, dataHora: true, validado: true },
     });
 
-    const agora = new Date();
-    const ultimoEhHoje = Boolean(ultimo) && isSameLocalDay(ultimo.dataHora, agora);
+    const ultimoEhHoje = Boolean(ultimo) && isSameLocalDay(ultimo.dataHora, refTime);
     // A sequência que controla o "tipo esperado" deve ser por dia:
     // - se não há registro hoje, o esperado é ENTRADA (mesmo que ontem tenha ficado "aberto").
     // - se há registro hoje, segue a sequência normal baseada no último de hoje.
     const proximoEsperado = ultimoEhHoje ? determinarProximoTipo(ultimo?.tipo) : 'ENTRADA';
     const ultimoAbreCiclo = Boolean(ultimo) && ultimo.tipo !== 'SAIDA';
-    const horasDesdeUltimo = ultimo ? diffHoras(agora, ultimo.dataHora) : 0;
-    const segundosDesdeUltimo = ultimo ? diffSegundos(agora, ultimo.dataHora) : 0;
+    const horasDesdeUltimo = ultimo ? diffHoras(refTime, ultimo.dataHora) : 0;
+    const segundosDesdeUltimo = ultimo ? diffSegundos(refTime, ultimo.dataHora) : 0;
 
     // ---- BLOQUEIO: batida seguida / duplo-clique / reenvio rápido ----
     // Mesmo com a sequência correta, um toque duplo ou retry pode gerar marcações em sequência.
@@ -393,6 +446,7 @@ async function registrar(req, res, next) {
           tenantId,
           usuarioId,
           tipo: 'ENTRADA',
+          dataHora: dataHoraRegistro,
           latitude: latitude ? parseFloat(latitude) : null,
           longitude: longitude ? parseFloat(longitude) : null,
           dentroGeofence,
@@ -402,6 +456,7 @@ async function registrar(req, res, next) {
           ipHash,
           userAgent: req.headers['user-agent']?.substring(0, 200),
           origem,
+          clientRequestId: clientReqIdDb,
         },
         include: {
           usuario: { select: { nome: true, cargo: true } },
@@ -463,7 +518,7 @@ async function registrar(req, res, next) {
       const minIntervaloAlmocoMin =
         tenant?.intervaloMinimoAlmocoMinutos ?? DEFAULT_MIN_INTERVALO_ALMOCO_MIN;
 
-      const { inicio, fim } = inicioFimDoDia(agora);
+      const { inicio, fim } = inicioFimDoDia(refTime);
       const ultimoHoje = await prisma.registroPonto.findFirst({
         where: { tenantId, usuarioId, deletedAt: null, dataHora: { gte: inicio, lte: fim } },
         orderBy: { dataHora: 'desc' },
@@ -471,7 +526,7 @@ async function registrar(req, res, next) {
       });
 
       if (ultimoHoje?.id) {
-        const minutos = diffMinutos(agora, ultimoHoje.dataHora);
+        const minutos = diffMinutos(refTime, ultimoHoje.dataHora);
 
         // SAIDA_ALMOCO ou SAIDA logo após ENTRADA/RETORNO
         if (
@@ -515,6 +570,7 @@ async function registrar(req, res, next) {
         tenantId,
         usuarioId,
         tipo,
+        dataHora: dataHoraRegistro,
         latitude: latitude ? parseFloat(latitude) : null,
         longitude: longitude ? parseFloat(longitude) : null,
         dentroGeofence,
@@ -524,6 +580,7 @@ async function registrar(req, res, next) {
         ipHash,
         userAgent: req.headers['user-agent']?.substring(0, 200),
         origem,
+        clientRequestId: clientReqIdDb,
       },
       include: {
         usuario: { select: { nome: true, cargo: true } }
