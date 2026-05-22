@@ -423,17 +423,18 @@ async function registrar(req, res, next) {
       });
     }
 
-    // Se virou o dia e ontem ficou "em aberto", permitimos iniciar o dia normalmente (ENTRADA),
-    // mas sinalizamos pendência para o administrativo ajustar o dia anterior.
-    // Observação: a regra anti-duplicidade por tipo/dia (acima) impede 2 ENTRADAS no mesmo dia.
-    if (!forcarNovoTurno && tipo === 'ENTRADA' && !ultimoEhHoje && ultimoAbreCiclo && ultimo?.id) {
+    // Virou o dia com ciclo aberto: primeira batida de hoje segue a sequência do dia atual;
+    // o dia anterior fica sinalizado para ajuste (aba Pendências / RH).
+    if (!forcarNovoTurno && !ultimoEhHoje && ultimoAbreCiclo && ultimo?.id) {
       await prisma.registroPonto.update({
         where: { id: ultimo.id },
         data: { validado: false },
       });
     }
 
-    if (ultimoAbreCiclo && horasDesdeUltimo >= LIMITE_TURNO_MAX_HORAS) {
+    // Turno aberto há 16h+ no MESMO dia: encerra ciclo e abre nova entrada automaticamente.
+    // Se virou o dia, não usa este atalho — o fluxo normal de ENTRADA do dia atual + pendência do dia anterior.
+    if (ultimoEhHoje && ultimoAbreCiclo && horasDesdeUltimo >= LIMITE_TURNO_MAX_HORAS) {
       // Saída do ciclo anterior provavelmente foi esquecida.
       // Força nova entrada e abre pendência no registro anterior (não validado).
       await prisma.registroPonto.update({
@@ -589,11 +590,11 @@ async function registrar(req, res, next) {
 
     // Se marcou pendência por virada de dia (ontem em aberto), devolve aviso para o frontend mostrar ao colaborador.
     const avisoViradaDia =
-      !forcarNovoTurno && tipo === 'ENTRADA' && !ultimoEhHoje && ultimoAbreCiclo && ultimo?.id
+      !forcarNovoTurno && !ultimoEhHoje && ultimoAbreCiclo && ultimo?.id
         ? {
             code: 'PENDENCIA_DIA_ANTERIOR',
             message:
-              'Detectamos um registro do dia anterior que ficou em aberto. O dia de hoje seguirá normalmente, e o administrativo deve ajustar o dia anterior.',
+              'Há batidas em aberto no dia anterior. Continue o ponto de hoje normalmente; use Pendências para justificar ou solicite ajuste do dia anterior.',
             pendencia: {
               registroId: ultimo.id,
               ultimoTipo: ultimo.tipo,
@@ -704,23 +705,20 @@ async function ultimoPonto(req, res, next) {
     // - se há registro hoje, segue a sequência baseada no último de hoje
     const proximoTipo = ultimoEhHoje ? determinarProximoTipo(ultimo?.tipo) : 'ENTRADA';
 
-    // Pendência (check-in antigo): entrada/ciclo aberto há tempo demais
+    // Pendência na UI: modal só no mesmo dia com turno aberto há muito tempo.
+    // Virada de dia com ciclo aberto → aviso leve; batidas faltantes vão para GET /pendencias.
     const pendenciaCheckin = (() => {
       if (!ultimo) return { aberta: false };
       if (ultimo.tipo === 'SAIDA') return { aberta: false };
       const horas = diffHoras(new Date(), ultimo.dataHora);
-      // Se virou o dia e ficou aberto, já considera pendência (mesmo com < 12h),
-      // porque o colaborador deve seguir o fluxo do dia atual e o administrativo ajusta o anterior.
       if (!ultimoEhHoje) {
         return {
-          aberta: true,
+          aberta: false,
+          diaAnteriorEmAberto: true,
           registroId: ultimo.id,
           ultimoTipo: ultimo.tipo,
           ultimoEm: ultimo.dataHora,
           horasAberto: Math.round(horas * 10) / 10,
-          modalLimiteHoras: LIMITE_PENDENCIA_MODAL_HORAS,
-          maxHorasAntesNovoTurno: LIMITE_TURNO_MAX_HORAS,
-          sugerirNovoTurno: true,
           motivo: 'DIA_ANTERIOR_EM_ABERTO',
         };
       }
@@ -734,6 +732,7 @@ async function ultimoPonto(req, res, next) {
         modalLimiteHoras: LIMITE_PENDENCIA_MODAL_HORAS,
         maxHorasAntesNovoTurno: LIMITE_TURNO_MAX_HORAS,
         sugerirNovoTurno: horas >= LIMITE_TURNO_MAX_HORAS,
+        motivo: 'TURNO_LONGO_MESMO_DIA',
       };
     })();
 
