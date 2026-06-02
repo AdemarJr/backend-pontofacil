@@ -5,7 +5,7 @@ const { validarGeofence, validarEmAlgumLocal } = require('../utils/geofence');
 const { calcularDia, pad2 } = require('../utils/espelhoCalculo');
 const crypto = require('crypto');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 const LIMITE_PENDENCIA_MODAL_HORAS = 12;
 const LIMITE_TURNO_MAX_HORAS = 16;
@@ -212,7 +212,7 @@ async function registrar(req, res, next) {
 
     const usuarioCompleto = await prisma.usuario.findFirst({
       where: { id: usuarioId, tenantId },
-      select: { localRegistroId: true },
+      select: { localRegistroId: true, isentoGeofence: true },
     });
 
     // Valida tipo de ponto
@@ -290,8 +290,8 @@ async function registrar(req, res, next) {
 
     // Valida geofence se ativo (cerca única legada ou múltiplos locais)
     let dentroGeofence = null;
-    // Regra: Totem não tem restrição de localização.
-    if (tenant.geofenceAtivo && origem !== 'TOTEM') {
+    // Regra: Totem não tem restrição; colaborador isento (remoto) também não.
+    if (tenant.geofenceAtivo && origem !== 'TOTEM' && !usuarioCompleto?.isentoGeofence) {
       if (!latitude || !longitude) {
         return res.status(400).json({ error: 'Localização obrigatória para este tenant' });
       }

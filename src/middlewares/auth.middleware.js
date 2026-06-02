@@ -2,7 +2,7 @@
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 // Verifica JWT e injeta usuário + tenant no request
 async function autenticar(req, res, next) {

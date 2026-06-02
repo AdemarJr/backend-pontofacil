@@ -1,6 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 const DIAS_VALIDOS = [1, 2, 3, 4, 5, 6, 7];
 

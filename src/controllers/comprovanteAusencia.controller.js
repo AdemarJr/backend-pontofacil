@@ -2,7 +2,7 @@
 const { PrismaClient } = require('@prisma/client');
 const { uploadComprovante, gerarUrlAssinada } = require('../services/s3.service');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 const DATA_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -231,4 +231,108 @@ async function decidir(req, res, next) {
   }
 }
 
-module.exports = { criar, listarMinhas, listar, obter, decidir };
+/**
+ * Marcadores manuais (criados pelo gestor, sem documento anexado). São os únicos
+ * tipos que podem ser removidos pela rota de remoção — atestados reais (com arquivo)
+ * nunca são apagados por aqui.
+ */
+const TIPOS_MANUAIS = ['FOLGA', 'JUSTIFICATIVA'];
+
+/**
+ * Admin: registra uma FOLGA ou uma JUSTIFICATIVA (falta justificada) sem documento.
+ * Reaproveita a tabela de comprovantes marcando tipoArquivo = 'FOLGA' | 'JUSTIFICATIVA'
+ * e status APROVADO, para que o espelho trate o(s) dia(s) como folga/justificada
+ * (esperado 0) em vez de falta.
+ */
+async function registrarFolga(req, res, next) {
+  try {
+    if (bloquearSuperAdmin(req, res)) return;
+    if (req.usuario.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Acesso restrito a administradores' });
+    }
+
+    const { usuarioId, dataReferencia, dataFim, descricao, tipo } = req.body || {};
+
+    const tipoMarcador = String(tipo).toUpperCase() === 'JUSTIFICATIVA' ? 'JUSTIFICATIVA' : 'FOLGA';
+
+    if (!usuarioId) {
+      return res.status(400).json({ error: 'Informe o colaborador (usuarioId)' });
+    }
+    if (!dataReferencia || !DATA_RE.test(String(dataReferencia))) {
+      return res.status(400).json({ error: 'Informe a data (AAAA-MM-DD)' });
+    }
+    if (dataFim && !DATA_RE.test(String(dataFim))) {
+      return res.status(400).json({ error: 'Data final inválida (AAAA-MM-DD)' });
+    }
+    if (dataFim && String(dataFim) < String(dataReferencia)) {
+      return res.status(400).json({ error: 'A data final não pode ser antes da inicial' });
+    }
+    // Justificar uma falta exige um motivo; folga é dispensa e o motivo é opcional.
+    if (tipoMarcador === 'JUSTIFICATIVA' && !String(descricao || '').trim()) {
+      return res.status(400).json({ error: 'Informe o motivo da justificativa' });
+    }
+
+    const tenantId = req.tenantId;
+
+    const colab = await prisma.usuario.findFirst({
+      where: { id: String(usuarioId), tenantId, role: 'COLABORADOR' },
+      select: { id: true },
+    });
+    if (!colab) return res.status(404).json({ error: 'Colaborador não encontrado' });
+
+    const descricaoPadrao =
+      tipoMarcador === 'JUSTIFICATIVA' ? 'Falta justificada pelo gestor' : 'Folga registrada pelo gestor';
+
+    const c = await prisma.comprovanteAusencia.create({
+      data: {
+        tenantId,
+        usuarioId: colab.id,
+        dataReferencia: String(dataReferencia),
+        dataFim: dataFim ? String(dataFim) : null,
+        descricao: descricao ? String(descricao).slice(0, 500) : descricaoPadrao,
+        tipoArquivo: tipoMarcador,
+        status: 'APROVADO',
+        respondidoPorId: req.usuario.id,
+        respondidoEm: new Date(),
+      },
+      include: {
+        usuario: { select: { id: true, nome: true, email: true, cargo: true } },
+        respondidoPor: { select: { id: true, nome: true } },
+      },
+    });
+
+    res.status(201).json(await serializar(c, false));
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Admin: remove um marcador manual (FOLGA ou JUSTIFICATIVA) criado pelo gestor.
+ * Nunca exclui atestados/comprovantes reais (com arquivo anexado).
+ */
+async function removerFolga(req, res, next) {
+  try {
+    if (bloquearSuperAdmin(req, res)) return;
+    if (req.usuario.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Acesso restrito a administradores' });
+    }
+
+    const existente = await prisma.comprovanteAusencia.findFirst({
+      where: { id: req.params.id, tenantId: req.tenantId },
+      select: { id: true, tipoArquivo: true, arquivoKey: true, arquivoUrl: true },
+    });
+    if (!existente) return res.status(404).json({ error: 'Não encontrado' });
+    const temArquivo = !!existente.arquivoKey || !!existente.arquivoUrl;
+    if (!TIPOS_MANUAIS.includes(existente.tipoArquivo) || temArquivo) {
+      return res.status(400).json({ error: 'Este registro é um atestado/comprovante e não pode ser removido por aqui.' });
+    }
+
+    await prisma.comprovanteAusencia.delete({ where: { id: existente.id } });
+    res.json({ sucesso: true });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { criar, listarMinhas, listar, obter, decidir, registrarFolga, removerFolga };

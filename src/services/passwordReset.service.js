@@ -4,7 +4,7 @@ const { PrismaClient } = require('@prisma/client');
 const { sendMail, isMailConfigured } = require('./mail.service');
 const { decryptPin } = require('../utils/pinCrypto');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 function frontendBase() {
   const raw = String(process.env.FRONTEND_URL || '').trim();
