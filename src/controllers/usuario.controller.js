@@ -4,7 +4,7 @@ const { PrismaClient } = require('@prisma/client');
 const { encryptPin, decryptPin } = require('../utils/pinCrypto');
 const { sendConviteUsuario } = require('../services/passwordReset.service');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 async function listar(req, res, next) {
   try {
@@ -14,6 +14,7 @@ async function listar(req, res, next) {
         id: true, nome: true, email: true, cargo: true,
         departamento: true, role: true, ativo: true, createdAt: true,
         localRegistroId: true,
+        isentoGeofence: true,
         dataAdmissao: true,
         dataDemissao: true,
       },
@@ -42,7 +43,7 @@ async function buscarPorId(req, res, next) {
 
 async function criar(req, res, next) {
   try {
-    const { nome, email, pin, cargo, departamento, role, localRegistroId, enviarConviteEmail, dataAdmissao, dataDemissao } = req.body;
+    const { nome, email, pin, cargo, departamento, role, localRegistroId, isentoGeofence, enviarConviteEmail, dataAdmissao, dataDemissao } = req.body;
 
     if (!nome || !email || !pin) {
       return res.status(400).json({ error: 'Nome, email e PIN são obrigatórios' });
@@ -76,6 +77,7 @@ async function criar(req, res, next) {
         departamento: departamento || null,
         role: role === 'ADMIN' ? 'ADMIN' : 'COLABORADOR',
         ...(localRegistroId && { localRegistroId }),
+        isentoGeofence: Boolean(isentoGeofence),
         dataAdmissao: dataAdmissao ? new Date(String(dataAdmissao) + 'T12:00:00') : null,
         dataDemissao: dataDemissao ? new Date(String(dataDemissao) + 'T12:00:00') : null,
       },
@@ -118,7 +120,7 @@ async function criar(req, res, next) {
 
 async function atualizar(req, res, next) {
   try {
-    const { nome, email, cargo, departamento, ativo, pin, localRegistroId, dataAdmissao, dataDemissao } = req.body;
+    const { nome, email, cargo, departamento, ativo, pin, localRegistroId, isentoGeofence, dataAdmissao, dataDemissao } = req.body;
 
     const dados = {
       ...(nome && { nome }),
@@ -171,6 +173,10 @@ async function atualizar(req, res, next) {
         if (!loc) return res.status(400).json({ error: 'Local de registro inválido' });
         dados.localRegistroId = localRegistroId;
       }
+    }
+
+    if (isentoGeofence !== undefined) {
+      dados.isentoGeofence = Boolean(isentoGeofence);
     }
 
     if (pin) {

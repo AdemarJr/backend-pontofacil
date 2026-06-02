@@ -1,4 +1,5 @@
 // src/server.js
+// reinício: Prisma client com isentoGeofence
 const path = require('path');
 const envFile =
   process.env.NODE_ENV === 'production' ? '.env.production' : '.env';

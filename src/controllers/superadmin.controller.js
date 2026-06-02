@@ -5,7 +5,7 @@ const { PrismaClient } = require('@prisma/client');
 const { frontendBase } = require('../services/passwordReset.service');
 const { sendPasswordResetEmail, sendFirstAccessInviteEmail } = require('../services/supabaseAuth.service');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 async function listarTenants(req, res, next) {
   try {

@@ -2,7 +2,7 @@
 const router = require('express').Router();
 const { PrismaClient } = require('@prisma/client');
 const { autenticar, exigirAdmin } = require('../middlewares/auth.middleware');
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 function isOutdatedSchemaError(err) {
   // Prisma: P2022 = column does not exist

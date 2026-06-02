@@ -1,6 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 async function listar(req, res, next) {
   try {

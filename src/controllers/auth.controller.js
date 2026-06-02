@@ -5,7 +5,7 @@ const { PrismaClient } = require('@prisma/client');
 const { requestForgotByEmail, resetPasswordWithToken, frontendBase } = require('../services/passwordReset.service');
 const { sendPasswordResetEmail, updatePasswordWithToken, sendNewManagerInviteEmail } = require('../services/supabaseAuth.service');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 function handlePrismaAuthError(err, res, next) {
   if (err.code === 'P1001' || err.code === 'P1017') {
