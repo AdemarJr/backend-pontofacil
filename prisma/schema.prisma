@@ -125,6 +125,9 @@ model Usuario {
   localRegistroId String?
   localRegistro   LocalRegistro? @relation(fields: [localRegistroId], references: [id], onDelete: SetNull)
 
+  /// Se true, o colaborador pode bater ponto de qualquer lugar (sem validar cerca virtual).
+  isentoGeofence Boolean @default(false)
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

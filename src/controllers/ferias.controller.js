@@ -1,7 +1,7 @@
 // src/controllers/ferias.controller.js
 const { PrismaClient } = require('@prisma/client');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
 
 function validarDataISO(d) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(d || ''));

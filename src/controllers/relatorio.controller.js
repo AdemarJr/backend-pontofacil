@@ -12,7 +12,63 @@ const {
   parseHoraMinutos,
 } = require('../utils/espelhoCalculo');
 
-const prisma = new PrismaClient();
+const prisma = require('../infra/prisma');
+
+/**
+ * Campos do RegistroPonto usados pelo espelho/relatórios.
+ * IMPORTANTE: `fotoUrl` é EXCLUÍDO de propósito. Ele guarda a imagem em base64
+ * (~50 KB por marcação) direto no banco; ao montar um mês inteiro para vários
+ * colaboradores, transferir todas as fotos deixa a query absurdamente lenta
+ * (dezenas de segundos → timeout). A foto não é usada no relatório; se for
+ * preciso visualizá-la, deve ser buscada sob demanda por registro.
+ */
+const SELECT_REGISTRO_ESPELHO = {
+  id: true,
+  tenantId: true,
+  usuarioId: true,
+  tipo: true,
+  dataHora: true,
+  origem: true,
+  validado: true,
+  fotoKey: true,
+  usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
+  ajuste: true,
+};
+
+/**
+ * Marcador usado no campo `tipoArquivo` de ComprovanteAusencia para diferenciar
+ * uma FOLGA (dispensa sem documento) de um atestado/comprovante real.
+ */
+const FOLGA_TIPO_ARQUIVO = 'FOLGA';
+
+/** Status possíveis de um dia no espelho. */
+const STATUS_DIA = {
+  TRABALHADO: 'TRABALHADO',
+  PARCIAL: 'PARCIAL',
+  FALTA: 'FALTA',
+  FOLGA: 'FOLGA',
+  FERIAS: 'FERIAS',
+  FERIADO: 'FERIADO',
+  JUSTIFICADA: 'JUSTIFICADA',
+  ANTES_ADMISSAO: 'ANTES_ADMISSAO',
+  POS_DEMISSAO: 'POS_DEMISSAO',
+  EM_ABERTO: 'EM_ABERTO',
+  FUTURO: 'FUTURO',
+};
+
+const STATUS_DIA_LABEL = {
+  TRABALHADO: 'Trabalhado',
+  PARCIAL: 'Parcial (falta marcação)',
+  FALTA: 'Falta',
+  FOLGA: 'Folga',
+  FERIAS: 'Férias',
+  FERIADO: 'Feriado',
+  JUSTIFICADA: 'Falta justificada',
+  ANTES_ADMISSAO: 'Antes da admissão',
+  POS_DEMISSAO: 'Após demissão',
+  EM_ABERTO: 'Em aberto (hoje)',
+  FUTURO: 'A cumprir',
+};
 
 /**
  * Entradas de gerente vindas de <input type="datetime-local"> chegam como "YYYY-MM-DDTHH:mm" sem fuso.
@@ -82,12 +138,6 @@ function whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }) {
  * aplicando feriados/férias/admissão/demissão no “esperado” e nas flags.
  */
 async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, usuarioFiltroId }) {
-  const tenant = await prisma.tenant.findUnique({
-    where: { id: tenantId },
-    select: { toleranciaMinutos: true },
-  });
-  const tol = tenant?.toleranciaMinutos ?? 5;
-
   function origemDoTipoEm(pontos, tipo, dt) {
     if (!dt) return '';
     const t = new Date(dt).getTime();
@@ -99,16 +149,21 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
   const primeiroDia = diasMes[0];
   const ultimoDia = diasMes[diasMes.length - 1];
 
-  const colaboradores = await prisma.usuario.findMany({
-    where: {
-      tenantId,
-      role: 'COLABORADOR',
-      ativo: true,
-      ...(usuarioFiltroId ? { id: String(usuarioFiltroId) } : {}),
-    },
-    select: { id: true, nome: true, cargo: true, departamento: true, dataAdmissao: true, dataDemissao: true },
-    orderBy: { nome: 'asc' },
-  });
+  // Tenant e colaboradores são independentes → buscar em paralelo (reduz round-trips ao banco).
+  const [tenant, colaboradores] = await Promise.all([
+    prisma.tenant.findUnique({ where: { id: tenantId }, select: { toleranciaMinutos: true } }),
+    prisma.usuario.findMany({
+      where: {
+        tenantId,
+        role: 'COLABORADOR',
+        ativo: true,
+        ...(usuarioFiltroId ? { id: String(usuarioFiltroId) } : {}),
+      },
+      select: { id: true, nome: true, cargo: true, departamento: true, dataAdmissao: true, dataDemissao: true },
+      orderBy: { nome: 'asc' },
+    }),
+  ]);
+  const tol = tenant?.toleranciaMinutos ?? 5;
 
   if (colaboradores.length === 0) {
     return {};
@@ -120,36 +175,65 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
     colaboradores.map((u) => [u.id, { dataAdmissao: u.dataAdmissao, dataDemissao: u.dataDemissao }])
   );
 
-  const feriados = await prisma.feriado.findMany({
-    where: { tenantId, data: { gte: primeiroDia, lte: ultimoDia } },
-    select: { data: true, nome: true, suspendeExpediente: true },
-  });
+  // Feriados, férias, escalas e comprovantes dependem só de uids → buscar todos em paralelo.
+  const [feriados, ferias, escalasAll, comprovantes] = await Promise.all([
+    prisma.feriado.findMany({
+      where: { tenantId, data: { gte: primeiroDia, lte: ultimoDia } },
+      select: { data: true, nome: true, suspendeExpediente: true },
+    }),
+    prisma.ferias.findMany({
+      where: {
+        tenantId,
+        usuarioId: { in: uids },
+        status: 'APROVADA',
+        AND: [{ dataInicio: { lte: ultimoDia } }, { dataFim: { gte: primeiroDia } }],
+      },
+      select: { usuarioId: true, dataInicio: true, dataFim: true, observacao: true },
+    }),
+    prisma.escala.findMany({
+      where: { tenantId, usuarioId: { in: uids }, ativo: true },
+      orderBy: { updatedAt: 'desc' },
+    }),
+    // Ausências aprovadas (atestados/folgas). Cobrem qualquer dia entre dataReferencia e dataFim (inclusive).
+    prisma.comprovanteAusencia.findMany({
+      where: {
+        tenantId,
+        usuarioId: { in: uids },
+        status: 'APROVADO',
+        dataReferencia: { lte: ultimoDia },
+        OR: [{ dataFim: null }, { dataFim: { gte: primeiroDia } }],
+      },
+      select: { id: true, usuarioId: true, dataReferencia: true, dataFim: true, descricao: true, tipoArquivo: true, arquivoKey: true, arquivoUrl: true },
+    }),
+  ]);
+
   const feriadoPorDia = Object.fromEntries(feriados.map((f) => [f.data, f]));
 
-  const ferias = await prisma.ferias.findMany({
-    where: {
-      tenantId,
-      usuarioId: { in: uids },
-      status: 'APROVADA',
-      AND: [{ dataInicio: { lte: ultimoDia } }, { dataFim: { gte: primeiroDia } }],
-    },
-    select: { usuarioId: true, dataInicio: true, dataFim: true, observacao: true },
-  });
   const feriasPorUsuario = {};
   for (const f of ferias) {
     if (!feriasPorUsuario[f.usuarioId]) feriasPorUsuario[f.usuarioId] = [];
     feriasPorUsuario[f.usuarioId].push(f);
   }
 
-  const escalasAll = await prisma.escala.findMany({
-    where: { tenantId, usuarioId: { in: uids }, ativo: true },
-    orderBy: { updatedAt: 'desc' },
-  });
   const escalasPorUsuario = {};
   for (const e of escalasAll) {
     if (!escalasPorUsuario[e.usuarioId]) escalasPorUsuario[e.usuarioId] = [];
     escalasPorUsuario[e.usuarioId].push(e);
   }
+
+  const comprovantesPorUsuario = {};
+  for (const c of comprovantes) {
+    if (!comprovantesPorUsuario[c.usuarioId]) comprovantesPorUsuario[c.usuarioId] = [];
+    comprovantesPorUsuario[c.usuarioId].push(c);
+  }
+  const comprovanteNoDia = (lista, dia) =>
+    (lista || []).find((c) => {
+      const ini = c.dataReferencia;
+      const fim = c.dataFim || c.dataReferencia;
+      return ini <= dia && fim >= dia;
+    }) || null;
+
+  const hojeISO = fmtDateISO(new Date());
 
   /** @type {Record<string, Record<string, any[]>>} */
   const pontosPorUsuarioDia = {};
@@ -163,7 +247,9 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       id: r.id,
       tipo: r.tipo,
       dataHora: r.ajuste ? r.ajuste.dataHoraNova : r.dataHora,
-      fotoUrl: r.fotoUrl,
+      // Foto não é carregada no espelho (base64 ~50KB cada deixa a query lenta).
+      // Usa-se o id do registro para buscar a imagem sob demanda quando necessário.
+      fotoUrl: null,
       origem: r.origem,
       ajustado: !!r.ajuste,
       motivoAjuste: r.ajuste?.motivo,
@@ -184,6 +270,18 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       deficitMesMin: 0,
       horaExtraMes: '00:00',
       saldoMes: '00:00',
+      resumo: {
+        diasUteis: 0,
+        trabalhados: 0,
+        parciais: 0,
+        faltas: 0,
+        folgas: 0,
+        justificadas: 0,
+        feriados: 0,
+        ferias: 0,
+        emAberto: 0,
+        futuros: 0,
+      },
     };
   }
 
@@ -192,8 +290,11 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
     let totalExtras = 0;
     let totalEsperadoMin = 0;
     const listaEsc = escalasPorUsuario[uid] || [];
+    const temEscala = listaEsc.length > 0;
     const meta = metaPorUsuario[uid] || {};
     const feriasU = feriasPorUsuario[uid] || [];
+    const comprovantesU = comprovantesPorUsuario[uid] || [];
+    const resumo = porUsuario[uid].resumo;
 
     for (const dia of diasMes) {
       const pontos = (pontosPorUsuarioDia[uid] && pontosPorUsuarioDia[uid][dia]) || [];
@@ -203,29 +304,80 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         toleranciaMinutos: tol,
         dataRef: dia,
       });
-      let minutos = calc.minutosTrabalhados;
+      const minutos = calc.minutosTrabalhados;
 
       const feriado = feriadoPorDia[dia];
       const feriasNoDia = feriasU.find((f) => f.dataInicio <= dia && f.dataFim >= dia) || null;
+      const comprovante = comprovanteNoDia(comprovantesU, dia);
+      const ehFolgaComprovante = comprovante?.tipoArquivo === FOLGA_TIPO_ARQUIVO;
       const admissaoOk = meta?.dataAdmissao ? fmtDateISO(meta.dataAdmissao) <= dia : true;
       const naoDemitidoNoDia = meta?.dataDemissao ? fmtDateISO(meta.dataDemissao) >= dia : true;
 
-      const suspendeExpediente =
-        (feriado?.suspendeExpediente === true) || Boolean(feriasNoDia) || !admissaoOk || !naoDemitidoNoDia;
+      // Um dia é "útil" (esperado trabalhar) quando: há escala e o dia está nela,
+      // OU não há escala cadastrada e é dia de semana (seg–sex). Caso contrário é folga.
+      const ehDiaUtilProgramado = temEscala
+        ? escalaDia != null
+        : (() => {
+            const dow = new Date(dia + 'T12:00:00').getDay();
+            return dow >= 1 && dow <= 5;
+          })();
+
+      const ehFuturo = dia > hojeISO;
+      const ehHoje = dia === hojeISO;
+      const temAlgumPonto = pontos.length > 0;
+
+      // Define o status do dia em ordem de prioridade.
+      let statusDia;
+      if (!admissaoOk) statusDia = STATUS_DIA.ANTES_ADMISSAO;
+      else if (!naoDemitidoNoDia) statusDia = STATUS_DIA.POS_DEMISSAO;
+      else if (feriado?.suspendeExpediente === true) statusDia = STATUS_DIA.FERIADO;
+      else if (feriasNoDia) statusDia = STATUS_DIA.FERIAS;
+      else if (comprovante) statusDia = ehFolgaComprovante ? STATUS_DIA.FOLGA : STATUS_DIA.JUSTIFICADA;
+      else if (!ehDiaUtilProgramado) statusDia = STATUS_DIA.FOLGA;
+      else if (temAlgumPonto) statusDia = calc.flags.faltandoMarcacao ? STATUS_DIA.PARCIAL : STATUS_DIA.TRABALHADO;
+      else if (ehFuturo) statusDia = STATUS_DIA.FUTURO;
+      else if (ehHoje) statusDia = STATUS_DIA.EM_ABERTO;
+      else statusDia = STATUS_DIA.FALTA;
+
+      // Só dia útil cumprido/devido conta como esperado. Folga/feriado/férias/justificada/futuro = 0.
+      const diaExigeJornada =
+        statusDia === STATUS_DIA.TRABALHADO ||
+        statusDia === STATUS_DIA.PARCIAL ||
+        statusDia === STATUS_DIA.FALTA ||
+        statusDia === STATUS_DIA.EM_ABERTO;
 
       const espMinBase = escalaDia ? Math.round(Number(escalaDia.cargaHorariaDiaria) * 60) : 8 * 60;
-      const espMin = suspendeExpediente ? 0 : espMinBase;
+      const espMin = diaExigeJornada ? espMinBase : 0;
+      const esperadoZero = espMin === 0;
       totalEsperadoMin += espMin;
 
       let flags = calc.flags;
       let extrasMinDia = calc.extrasMin;
-      if (suspendeExpediente) {
+      if (esperadoZero) {
+        // Trabalho em dia sem jornada esperada (folga/feriado/férias) entra como extra.
         flags = { ...flags, faltandoMarcacao: false };
         extrasMinDia = Math.max(0, minutos);
       }
 
+      // Contadores do resumo mensal.
+      if (diaExigeJornada) resumo.diasUteis += 1;
+      switch (statusDia) {
+        case STATUS_DIA.TRABALHADO: resumo.trabalhados += 1; break;
+        case STATUS_DIA.PARCIAL: resumo.parciais += 1; break;
+        case STATUS_DIA.FALTA: resumo.faltas += 1; break;
+        case STATUS_DIA.FOLGA: resumo.folgas += 1; break;
+        case STATUS_DIA.JUSTIFICADA: resumo.justificadas += 1; break;
+        case STATUS_DIA.FERIADO: resumo.feriados += 1; break;
+        case STATUS_DIA.FERIAS: resumo.ferias += 1; break;
+        case STATUS_DIA.EM_ABERTO: resumo.emAberto += 1; break;
+        case STATUS_DIA.FUTURO: resumo.futuros += 1; break;
+        default: break;
+      }
+
       porUsuario[uid].diasTrabalhados[dia] = {
         pontos,
+        statusDia,
+        statusLabel: STATUS_DIA_LABEL[statusDia] || statusDia,
         minutosTrabalhados: minutos,
         horasTrabalhadas: fmtHours(minutos),
         extras: fmtHours(extrasMinDia),
@@ -248,11 +400,25 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         jornadaContratualMin: calc.jornadaContratualMin,
         saldoDiaMin: minutos - espMin,
         contextoDia: {
-          suspendeExpediente,
+          suspendeExpediente: esperadoZero,
           ...(feriado
             ? { feriado: { nome: feriado.nome, suspendeExpediente: feriado.suspendeExpediente } }
             : {}),
           ...(feriasNoDia ? { ferias: { dataInicio: feriasNoDia.dataInicio, dataFim: feriasNoDia.dataFim } } : {}),
+          ...(comprovante
+            ? {
+                ausencia: {
+                  id: comprovante.id,
+                  tipo: ehFolgaComprovante ? 'FOLGA' : 'JUSTIFICADA',
+                  descricao: comprovante.descricao || null,
+                  // "manual" = criado pelo gestor (folga/justificativa sem documento) → pode ser removido.
+                  manual:
+                    (comprovante.tipoArquivo === 'FOLGA' || comprovante.tipoArquivo === 'JUSTIFICATIVA') &&
+                    !comprovante.arquivoKey &&
+                    !comprovante.arquivoUrl,
+                },
+              }
+            : {}),
           ...(meta?.dataAdmissao ? { dataAdmissao: fmtDateISO(meta.dataAdmissao) } : {}),
           ...(meta?.dataDemissao ? { dataDemissao: fmtDateISO(meta.dataDemissao) } : {}),
         },
@@ -290,10 +456,7 @@ async function espelhoPonto(req, res, next) {
 
     const registros = await prisma.registroPonto.findMany({
       where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
-      include: {
-        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
-        ajuste: true,
-      },
+      select: SELECT_REGISTRO_ESPELHO,
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
     });
 
@@ -349,7 +512,10 @@ function buildEspelhoRows(relatorio, periodo) {
       let contextoDia = '';
       if (ctx?.feriado?.nome && ctx?.feriado?.suspendeExpediente) contextoDia = `Feriado: ${ctx.feriado.nome}`;
       else if (ctx?.ferias) contextoDia = `Férias (${ctx.ferias.dataInicio} → ${ctx.ferias.dataFim})`;
-      else if (ctx?.suspendeExpediente) {
+      else if (ctx?.ausencia) {
+        const pref = ctx.ausencia.tipo === 'FOLGA' ? 'Folga' : 'Falta justificada';
+        contextoDia = ctx.ausencia.descricao ? `${pref}: ${ctx.ausencia.descricao}` : pref;
+      } else if (ctx?.suspendeExpediente) {
         if (ctx?.dataAdmissao) contextoDia = `Antes da admissão (a partir de ${ctx.dataAdmissao})`;
         else if (ctx?.dataDemissao) contextoDia = `Após demissão (${ctx.dataDemissao})`;
       }
@@ -359,6 +525,7 @@ function buildEspelhoRows(relatorio, periodo) {
         nome: item.usuario?.nome ?? '',
         cargo: item.usuario?.cargo ?? '',
         departamento: item.usuario?.departamento ?? '',
+        status: d.statusLabel ?? d.statusDia ?? '',
         entrada: d.marcacoes?.entrada ?? '',
         origemEntrada: o.entrada ?? '',
         saidaAlmoco: d.marcacoes?.saidaAlmoco ?? '',
@@ -394,6 +561,7 @@ function rowsToCsv(rows) {
     'nome',
     'cargo',
     'departamento',
+    'status',
     'entrada',
     'origemEntrada',
     'saidaAlmoco',
@@ -441,10 +609,7 @@ async function espelhoExport(req, res, next) {
 
     const registros = await prisma.registroPonto.findMany({
       where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
-      include: {
-        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
-        ajuste: true,
-      },
+      select: SELECT_REGISTRO_ESPELHO,
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
     });
 
@@ -469,6 +634,7 @@ async function espelhoExport(req, res, next) {
         { header: 'Nome', key: 'nome', width: 28 },
         { header: 'Cargo', key: 'cargo', width: 16 },
         { header: 'Departamento', key: 'departamento', width: 18 },
+        { header: 'Status do dia', key: 'status', width: 18 },
         { header: 'Entrada', key: 'entrada', width: 10 },
         { header: 'Origem (Entrada)', key: 'origemEntrada', width: 16 },
         { header: 'Saída Almoço', key: 'saidaAlmoco', width: 12 },
@@ -511,8 +677,8 @@ async function espelhoExport(req, res, next) {
       doc.fontSize(10).text(`Período: ${pad2(mesNum)}/${anoNum}`, { align: 'left' });
       doc.moveDown(0.5);
 
-      const headers = ['Dia', 'Nome', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
-      const colW = [52, 120, 40, 40, 40, 40, 92, 92];
+      const headers = ['Dia', 'Nome', 'Status', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
+      const colW = [50, 104, 66, 38, 38, 38, 38, 76, 76];
       const startX = doc.x;
       let y = doc.y;
 
@@ -540,7 +706,7 @@ async function espelhoExport(req, res, next) {
         if (r.saidaAntecipada === 'SIM') flags.push('SAIDA_ANT');
         if (r.almocoForaJanela === 'SIM') flags.push('ALMOCO');
         rowLine(
-          [r.dia, r.nome, r.entrada, r.saida, r.horasTrabalhadas, r.extras, r.contextoDia || '', flags.join(',')],
+          [r.dia, r.nome, r.status || '', r.entrada, r.saida, r.horasTrabalhadas, r.extras, r.contextoDia || '', flags.join(',')],
           false
         );
       }
@@ -577,10 +743,7 @@ async function espelhoMeu(req, res, next) {
 
     const registros = await prisma.registroPonto.findMany({
       where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
-      include: {
-        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
-        ajuste: true,
-      },
+      select: SELECT_REGISTRO_ESPELHO,
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
     });
 
@@ -643,10 +806,7 @@ async function espelhoMeuExport(req, res, next) {
 
     const registros = await prisma.registroPonto.findMany({
       where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
-      include: {
-        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
-        ajuste: true,
-      },
+      select: SELECT_REGISTRO_ESPELHO,
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
     });
 
@@ -671,6 +831,7 @@ async function espelhoMeuExport(req, res, next) {
         { header: 'Nome', key: 'nome', width: 28 },
         { header: 'Cargo', key: 'cargo', width: 16 },
         { header: 'Departamento', key: 'departamento', width: 18 },
+        { header: 'Status do dia', key: 'status', width: 18 },
         { header: 'Entrada', key: 'entrada', width: 10 },
         { header: 'Origem (Entrada)', key: 'origemEntrada', width: 16 },
         { header: 'Saída Almoço', key: 'saidaAlmoco', width: 12 },
@@ -713,8 +874,8 @@ async function espelhoMeuExport(req, res, next) {
       doc.fontSize(10).text(`Período: ${pad2(mesNum)}/${anoNum}`, { align: 'left' });
       doc.moveDown(0.5);
 
-      const headers = ['Dia', 'Nome', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
-      const colW = [52, 120, 40, 40, 40, 40, 92, 92];
+      const headers = ['Dia', 'Nome', 'Status', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
+      const colW = [50, 104, 66, 38, 38, 38, 38, 76, 76];
       const startX = doc.x;
       let y = doc.y;
 
@@ -742,7 +903,7 @@ async function espelhoMeuExport(req, res, next) {
         if (r.saidaAntecipada === 'SIM') flags.push('SAIDA_ANT');
         if (r.almocoForaJanela === 'SIM') flags.push('ALMOCO');
         rowLine(
-          [r.dia, r.nome, r.entrada, r.saida, r.horasTrabalhadas, r.extras, r.contextoDia || '', flags.join(',')],
+          [r.dia, r.nome, r.status || '', r.entrada, r.saida, r.horasTrabalhadas, r.extras, r.contextoDia || '', flags.join(',')],
           false
         );
       }
@@ -803,10 +964,7 @@ async function fechamentoAprovar(req, res, next) {
 
     const registros = await prisma.registroPonto.findMany({
       where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
-      include: {
-        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
-        ajuste: true,
-      },
+      select: SELECT_REGISTRO_ESPELHO,
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
     });
 
@@ -1023,10 +1181,7 @@ async function bancoHorasResumo(req, res, next) {
 
     const registros = await prisma.registroPonto.findMany({
       where: whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }),
-      include: {
-        usuario: { select: { id: true, nome: true, cargo: true, departamento: true } },
-        ajuste: true,
-      },
+      select: SELECT_REGISTRO_ESPELHO,
       orderBy: [{ usuarioId: 'asc' }, { dataHora: 'asc' }],
     });
 
@@ -1045,12 +1200,13 @@ async function bancoHorasResumo(req, res, next) {
       totalHoras: u.totalHoras,
       horaExtraMes: u.horaExtraMes,
       saldoMes: u.saldoMes,
+      diasResumo: u.resumo,
     }));
 
     res.json({
       periodo: { mes: mesNum, ano: anoNum },
       obs:
-        'Saldo = trabalhado − esperado no mês. O esperado considera todos os dias do mês; em feriados (com expediente suspenso), férias aprovadas, antes da admissão ou após demissão o esperado do dia é 0.',
+        'Saldo = trabalhado − esperado. O esperado conta apenas dias úteis devidos; folgas (semanais ou avulsas), feriados, férias, faltas justificadas e dias futuros têm esperado 0.',
       resumo: lista,
     });
   } catch (err) {
