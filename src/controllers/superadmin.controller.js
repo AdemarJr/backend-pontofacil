@@ -28,7 +28,7 @@ async function listarTenants(req, res, next) {
     const tenants = await prisma.tenant.findMany({
       include: {
         _count: { select: { usuarios: true, registros: true } },
-        features: true,
+        features: { select: { tenantId: true, payrollModuleEnabled: true, updatedAt: true } },
         usuarios: {
           where: { role: 'ADMIN' },
           select: { id: true, nome: true, email: true },
@@ -186,10 +186,18 @@ async function atualizarTenant(req, res, next) {
       });
 
       if (payrollModuleEnabled !== undefined) {
+        const agora = new Date();
         await tx.tenantFeature.upsert({
           where: { tenantId: id },
-          create: { tenantId: id, payrollModuleEnabled: Boolean(payrollModuleEnabled) },
-          update: { payrollModuleEnabled: Boolean(payrollModuleEnabled) },
+          create: {
+            tenantId: id,
+            payrollModuleEnabled: Boolean(payrollModuleEnabled),
+            updatedAt: agora,
+          },
+          update: {
+            payrollModuleEnabled: Boolean(payrollModuleEnabled),
+            updatedAt: agora,
+          },
         });
       }
 
@@ -222,13 +230,25 @@ async function atualizarFeatures(req, res, next) {
     const { id: tenantId } = req.params;
     const { payrollModuleEnabled } = req.body;
 
+    if (payrollModuleEnabled === undefined) {
+      return res.status(400).json({ error: 'Informe payrollModuleEnabled (true ou false)' });
+    }
+
     const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
     if (!tenant) return res.status(404).json({ error: 'Empresa não encontrada' });
 
+    const agora = new Date();
     const features = await prisma.tenantFeature.upsert({
       where: { tenantId },
-      create: { tenantId, payrollModuleEnabled: Boolean(payrollModuleEnabled) },
-      update: { payrollModuleEnabled: Boolean(payrollModuleEnabled) },
+      create: {
+        tenantId,
+        payrollModuleEnabled: Boolean(payrollModuleEnabled),
+        updatedAt: agora,
+      },
+      update: {
+        payrollModuleEnabled: Boolean(payrollModuleEnabled),
+        updatedAt: agora,
+      },
     });
 
     res.json(features);

@@ -164,6 +164,14 @@ CREATE INDEX IF NOT EXISTS holerites_folhaRunId_idx
 CREATE INDEX IF NOT EXISTS holerites_usuarioId_idx
   ON public.holerites ("usuarioId");
 
+-- Garante uma linha em tenant_features para cada empresa existente (upsert no Super Admin)
+INSERT INTO public.tenant_features ("tenantId", "payrollModuleEnabled", "updatedAt")
+SELECT t.id, false, CURRENT_TIMESTAMP
+FROM public.tenants t
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.tenant_features tf WHERE tf."tenantId" = t.id
+);
+
 -- Foreign keys
 DO $$ BEGIN
   ALTER TABLE public.tenant_features
