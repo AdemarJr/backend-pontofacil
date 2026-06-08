@@ -283,8 +283,9 @@ app.use((err, req, res, next) => {
   const msg = String(err?.message || '');
   const prismaCode = err?.code;
   const schemaOutdated =
+    prismaCode === 'P2021' ||
     prismaCode === 'P2022' ||
-    (msg.toLowerCase().includes('column') && msg.toLowerCase().includes('does not exist'));
+    /does not exist/i.test(msg);
   if (schemaOutdated) {
     return res.status(500).json({
       error:

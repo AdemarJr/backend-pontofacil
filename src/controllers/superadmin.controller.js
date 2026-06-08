@@ -8,6 +8,21 @@ const { sendPasswordResetEmail, sendFirstAccessInviteEmail } = require('../servi
 const prisma = require('../infra/prisma');
 const { resolverDadosContrato, diasAteExpiracao } = require('../shared/contractPeriod');
 
+function responderErroSchemaPrisma(err, res) {
+  const msg = String(err?.message || '');
+  const schemaDesatualizado =
+    err?.code === 'P2021' ||
+    err?.code === 'P2022' ||
+    /does not exist/i.test(msg);
+  if (!schemaDesatualizado) return false;
+  res.status(500).json({
+    error:
+      'Banco de dados desatualizado para o módulo de folha. Execute folha-pagamento-atualizacao.sql no Supabase (PARTE 1 e PARTE 2) e reinicie o backend.',
+    code: 'DB_SCHEMA_OUTDATED',
+  });
+  return true;
+}
+
 async function listarTenants(req, res, next) {
   try {
     const tenants = await prisma.tenant.findMany({
@@ -23,7 +38,10 @@ async function listarTenants(req, res, next) {
       orderBy: { createdAt: 'desc' },
     });
     res.json(tenants);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (responderErroSchemaPrisma(err, res)) return;
+    next(err);
+  }
 }
 
 async function criarTenant(req, res, next) {
@@ -122,7 +140,10 @@ async function criarTenant(req, res, next) {
 async function atualizarTenant(req, res, next) {
   try {
     const { id } = req.params;
-    const { razaoSocial, nomeFantasia, cnpj, email, telefone, plano } = req.body;
+    const {
+      razaoSocial, nomeFantasia, cnpj, email, telefone, plano,
+      payrollModuleEnabled, contractStartDate, periodoContrato,
+    } = req.body;
 
     const existente = await prisma.tenant.findUnique({ where: { id } });
     if (!existente) return res.status(404).json({ error: 'Empresa não encontrada' });
@@ -132,19 +153,63 @@ async function atualizarTenant(req, res, next) {
       if (dup) return res.status(409).json({ error: 'CNPJ já cadastrado para outra empresa' });
     }
 
-    const tenant = await prisma.tenant.update({
-      where: { id },
-      data: {
-        ...(razaoSocial !== undefined && { razaoSocial }),
-        ...(nomeFantasia !== undefined && { nomeFantasia }),
-        ...(cnpj !== undefined && { cnpj }),
-        ...(email !== undefined && { email }),
-        ...(telefone !== undefined && { telefone: telefone || null }),
-        ...(plano !== undefined && { plano }),
-      },
+    let dadosContrato;
+    const atualizaContrato =
+      periodoContrato !== undefined || contractStartDate !== undefined;
+    if (atualizaContrato) {
+      try {
+        dadosContrato = resolverDadosContrato({
+          contractStartDate: periodoContrato && periodoContrato !== 'SEM_LIMITE'
+            ? contractStartDate
+            : null,
+          periodoContrato: !periodoContrato || periodoContrato === 'SEM_LIMITE'
+            ? null
+            : periodoContrato,
+        });
+      } catch (e) {
+        return res.status(400).json({ error: e.message });
+      }
+    }
+
+    const tenant = await prisma.$transaction(async (tx) => {
+      await tx.tenant.update({
+        where: { id },
+        data: {
+          ...(razaoSocial !== undefined && { razaoSocial }),
+          ...(nomeFantasia !== undefined && { nomeFantasia }),
+          ...(cnpj !== undefined && { cnpj }),
+          ...(email !== undefined && { email }),
+          ...(telefone !== undefined && { telefone: telefone || null }),
+          ...(plano !== undefined && { plano }),
+          ...(dadosContrato && dadosContrato),
+        },
+      });
+
+      if (payrollModuleEnabled !== undefined) {
+        await tx.tenantFeature.upsert({
+          where: { tenantId: id },
+          create: { tenantId: id, payrollModuleEnabled: Boolean(payrollModuleEnabled) },
+          update: { payrollModuleEnabled: Boolean(payrollModuleEnabled) },
+        });
+      }
+
+      return tx.tenant.findUnique({
+        where: { id },
+        include: { features: true },
+      });
     });
+
+    if (tenant.status === 'SUSPENSO' && tenant.periodoContrato && tenant.contractEndDate) {
+      const dias = diasAteExpiracao(tenant.contractEndDate);
+      if (dias != null && dias >= 0) {
+        await prisma.tenant.update({ where: { id }, data: { status: 'ATIVO' } });
+        tenant.status = 'ATIVO';
+      }
+    }
+
     res.json(tenant);
   } catch (err) {
+    if (responderErroSchemaPrisma(err, res)) return;
     if (err.code === 'P2002') {
       return res.status(409).json({ error: 'CNPJ ou e-mail já cadastrado' });
     }
@@ -167,7 +232,10 @@ async function atualizarFeatures(req, res, next) {
     });
 
     res.json(features);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (responderErroSchemaPrisma(err, res)) return;
+    next(err);
+  }
 }
 
 async function atualizarContrato(req, res, next) {
@@ -200,7 +268,10 @@ async function atualizarContrato(req, res, next) {
     }
 
     res.json(tenant);
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (responderErroSchemaPrisma(err, res)) return;
+    next(err);
+  }
 }
 
 /** Cadastra um usuário ADMIN em uma empresa já existente (login: e-mail + senha no /login) */
