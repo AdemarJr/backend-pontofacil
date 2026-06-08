@@ -237,19 +237,31 @@ async function atualizarFeatures(req, res, next) {
     const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
     if (!tenant) return res.status(404).json({ error: 'Empresa não encontrada' });
 
+    const habilitado = payrollModuleEnabled === true || payrollModuleEnabled === 'true';
     const agora = new Date();
-    const features = await prisma.tenantFeature.upsert({
+
+    await prisma.$executeRaw`
+      INSERT INTO "tenant_features" ("tenantId", "payrollModuleEnabled", "updatedAt")
+      VALUES (${tenantId}, ${habilitado}, ${agora})
+      ON CONFLICT ("tenantId")
+      DO UPDATE SET
+        "payrollModuleEnabled" = ${habilitado},
+        "updatedAt" = ${agora}
+    `;
+
+    const features = await prisma.tenantFeature.findUnique({
       where: { tenantId },
-      create: {
-        tenantId,
-        payrollModuleEnabled: Boolean(payrollModuleEnabled),
-        updatedAt: agora,
-      },
-      update: {
-        payrollModuleEnabled: Boolean(payrollModuleEnabled),
-        updatedAt: agora,
-      },
+      select: { tenantId: true, payrollModuleEnabled: true, updatedAt: true },
     });
+
+    if (!features || features.payrollModuleEnabled !== habilitado) {
+      return res.status(500).json({
+        error: 'Falha ao gravar módulo de folha. Tente novamente ou contate o suporte.',
+        code: 'FEATURE_SAVE_FAILED',
+        esperado: habilitado,
+        gravado: features?.payrollModuleEnabled ?? null,
+      });
+    }
 
     res.json(features);
   } catch (err) {

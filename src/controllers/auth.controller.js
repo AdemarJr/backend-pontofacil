@@ -107,8 +107,11 @@ async function loginEmail(req, res, next) {
         nome: usuario.nome,
         email: usuario.email,
         role: usuario.role,
-        tenant: usuario.tenant,
-      }
+        tenant: {
+          ...usuario.tenant,
+          features: usuario.tenant.features ?? { payrollModuleEnabled: false },
+        },
+      },
     });
   } catch (err) {
     return handlePrismaAuthError(err, res, next);

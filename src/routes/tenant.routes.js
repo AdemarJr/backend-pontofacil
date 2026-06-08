@@ -32,7 +32,10 @@ router.get('/meu', autenticar, async (req, res, next) => {
         features: { select: { payrollModuleEnabled: true } },
       }
     });
-    res.json(tenant);
+    res.json({
+      ...tenant,
+      features: tenant.features ?? { payrollModuleEnabled: false },
+    });
   } catch (err) {
     if (isOutdatedSchemaError(err)) {
       return res.status(500).json({
