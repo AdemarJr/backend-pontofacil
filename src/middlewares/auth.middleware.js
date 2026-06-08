@@ -4,6 +4,7 @@ const { PrismaClient } = require('@prisma/client');
 
 const prisma = require('../infra/prisma');
 const { isContractExpired, contractExpiredPayload } = require('../shared/contractCheck');
+const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
 
 // Verifica JWT e injeta usuário + tenant no request
 async function autenticar(req, res, next) {
@@ -29,11 +30,7 @@ async function autenticar(req, res, next) {
     } else {
       const usuario = await prisma.usuario.findUnique({
         where: { id: decoded.id },
-        include: {
-          tenant: {
-            include: { features: true },
-          },
-        },
+        include: { tenant: true },
       });
 
       if (!usuario || !usuario.ativo) {
@@ -48,10 +45,13 @@ async function autenticar(req, res, next) {
         return res.status(403).json(contractExpiredPayload(usuario.tenant));
       }
 
+      const features = await lerFeaturesDoTenant(usuario.tenantId);
+      usuario.tenant.features = features;
+
       req.usuario = usuario;
       req.tenantId = usuario.tenantId;
       req.tenant = usuario.tenant;
-      req.tenantFeatures = usuario.tenant.features;
+      req.tenantFeatures = features;
     }
 
     next();

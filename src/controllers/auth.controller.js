@@ -7,6 +7,7 @@ const { sendPasswordResetEmail, updatePasswordWithToken, sendNewManagerInviteEma
 
 const prisma = require('../infra/prisma');
 const { isContractExpired, contractExpiredPayload } = require('../shared/contractCheck');
+const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
 
 function handlePrismaAuthError(err, res, next) {
   if (err.code === 'P1001' || err.code === 'P1017') {
@@ -99,6 +100,7 @@ async function loginEmail(req, res, next) {
     const valido = await bcrypt.compare(senha, hashLogin);
     if (!valido) return res.status(401).json({ error: 'Credenciais inválidas' });
 
+    const features = await lerFeaturesDoTenant(usuario.tenantId);
     const tokens = gerarTokens({ id: usuario.id, tenantId: usuario.tenantId, role: usuario.role });
     return res.json({
       ...tokens,
@@ -109,7 +111,7 @@ async function loginEmail(req, res, next) {
         role: usuario.role,
         tenant: {
           ...usuario.tenant,
-          features: usuario.tenant.features ?? { payrollModuleEnabled: false },
+          features,
         },
       },
     });

@@ -1,5 +1,5 @@
 // src/shared/middlewares/exigirFeature.js
-const prisma = require('../../infra/prisma');
+const { lerFeaturesDoTenant } = require('../tenantFeatures');
 
 const FEATURE_LABELS = {
   payroll: 'Módulo de Folha de Pagamento',
@@ -13,11 +13,9 @@ function exigirFeature(featureKey) {
         return res.status(403).json({ error: 'Tenant não identificado' });
       }
 
-      const features = await prisma.tenantFeature.findUnique({
-        where: { tenantId: req.tenantId },
-      });
+      const features = await lerFeaturesDoTenant(req.tenantId);
 
-      const enabled = featureKey === 'payroll' && features?.payrollModuleEnabled === true;
+      const enabled = featureKey === 'payroll' && features.payrollModuleEnabled === true;
 
       if (!enabled) {
         return res.status(403).json({

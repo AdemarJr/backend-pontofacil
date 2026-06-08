@@ -7,6 +7,7 @@ const { sendPasswordResetEmail, sendFirstAccessInviteEmail } = require('../servi
 
 const prisma = require('../infra/prisma');
 const { resolverDadosContrato, diasAteExpiracao } = require('../shared/contractPeriod');
+const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
 
 function responderErroSchemaPrisma(err, res) {
   const msg = String(err?.message || '');
@@ -28,7 +29,6 @@ async function listarTenants(req, res, next) {
     const tenants = await prisma.tenant.findMany({
       include: {
         _count: { select: { usuarios: true, registros: true } },
-        features: { select: { tenantId: true, payrollModuleEnabled: true, updatedAt: true } },
         usuarios: {
           where: { role: 'ADMIN' },
           select: { id: true, nome: true, email: true },
@@ -37,7 +37,15 @@ async function listarTenants(req, res, next) {
       },
       orderBy: { createdAt: 'desc' },
     });
-    res.json(tenants);
+
+    const tenantsComFeatures = await Promise.all(
+      tenants.map(async (t) => ({
+        ...t,
+        features: await lerFeaturesDoTenant(t.id),
+      }))
+    );
+
+    res.json(tenantsComFeatures);
   } catch (err) {
     if (responderErroSchemaPrisma(err, res)) return;
     next(err);
@@ -201,11 +209,10 @@ async function atualizarTenant(req, res, next) {
         });
       }
 
-      return tx.tenant.findUnique({
-        where: { id },
-        include: { features: true },
-      });
+      return tx.tenant.findUnique({ where: { id } });
     });
+
+    tenant.features = await lerFeaturesDoTenant(id);
 
     if (tenant.status === 'SUSPENSO' && tenant.periodoContrato && tenant.contractEndDate) {
       const dias = diasAteExpiracao(tenant.contractEndDate);

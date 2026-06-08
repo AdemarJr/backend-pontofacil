@@ -3,6 +3,7 @@ const router = require('express').Router();
 const { PrismaClient } = require('@prisma/client');
 const { autenticar, exigirAdmin } = require('../middlewares/auth.middleware');
 const prisma = require('../infra/prisma');
+const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
 
 function isOutdatedSchemaError(err) {
   // Prisma: P2022 = column does not exist
@@ -11,30 +12,41 @@ function isOutdatedSchemaError(err) {
   return msg.includes('does not exist') && msg.includes('column');
 }
 
+router.get('/meu/features', autenticar, async (req, res, next) => {
+  try {
+    const features = await lerFeaturesDoTenant(req.tenantId);
+    res.json(features);
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/meu', autenticar, async (req, res, next) => {
   try {
-    const tenant = await prisma.tenant.findUnique({
-      where: { id: req.tenantId },
-      select: {
-        id: true, razaoSocial: true, nomeFantasia: true, cnpj: true,
-        plano: true, status: true, geofenceLat: true, geofenceLng: true,
-        geofenceRaio: true,
-        geofenceAtivo: true,
-        fotoObrigatoria: true,
-        permitirTotem: true,
-        permitirMeuPonto: true,
-        toleranciaMinutos: true,
-        trabalhoMinimoAntesSaidaMinutos: true,
-        intervaloMinimoAlmocoMinutos: true,
-        periodoContrato: true,
-        contractStartDate: true,
-        contractEndDate: true,
-        features: { select: { payrollModuleEnabled: true } },
-      }
-    });
+    const [tenant, features] = await Promise.all([
+      prisma.tenant.findUnique({
+        where: { id: req.tenantId },
+        select: {
+          id: true, razaoSocial: true, nomeFantasia: true, cnpj: true,
+          plano: true, status: true, geofenceLat: true, geofenceLng: true,
+          geofenceRaio: true,
+          geofenceAtivo: true,
+          fotoObrigatoria: true,
+          permitirTotem: true,
+          permitirMeuPonto: true,
+          toleranciaMinutos: true,
+          trabalhoMinimoAntesSaidaMinutos: true,
+          intervaloMinimoAlmocoMinutos: true,
+          periodoContrato: true,
+          contractStartDate: true,
+          contractEndDate: true,
+        },
+      }),
+      lerFeaturesDoTenant(req.tenantId),
+    ]);
     res.json({
       ...tenant,
-      features: tenant.features ?? { payrollModuleEnabled: false },
+      features,
     });
   } catch (err) {
     if (isOutdatedSchemaError(err)) {
