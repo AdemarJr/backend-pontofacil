@@ -6,6 +6,7 @@ const { requestForgotByEmail, resetPasswordWithToken, frontendBase } = require('
 const { sendPasswordResetEmail, updatePasswordWithToken, sendNewManagerInviteEmail } = require('../services/supabaseAuth.service');
 
 const prisma = require('../infra/prisma');
+const { isContractExpired, contractExpiredPayload } = require('../shared/contractCheck');
 
 function handlePrismaAuthError(err, res, next) {
   if (err.code === 'P1001' || err.code === 'P1017') {
@@ -77,6 +78,9 @@ async function loginEmail(req, res, next) {
             geofenceAtivo: true,
             permitirTotem: true,
             permitirMeuPonto: true,
+            periodoContrato: true,
+            contractEndDate: true,
+            features: { select: { payrollModuleEnabled: true } },
           },
         },
       }
@@ -85,6 +89,10 @@ async function loginEmail(req, res, next) {
     if (!usuario) return res.status(401).json({ error: 'Credenciais inválidas' });
     if (usuario.tenant.status !== 'ATIVO') {
       return res.status(403).json({ error: 'Empresa com acesso suspenso' });
+    }
+
+    if (isContractExpired(usuario.tenant)) {
+      return res.status(403).json(contractExpiredPayload(usuario.tenant));
     }
 
     const hashLogin = usuario.senhaHash || usuario.pinHash;

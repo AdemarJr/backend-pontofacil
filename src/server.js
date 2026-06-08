@@ -21,6 +21,7 @@ const comprovanteAusenciaRoutes = require('./routes/comprovanteAusencia.routes')
 const feriadoRoutes = require('./routes/feriado.routes');
 const feriasRoutes = require('./routes/ferias.routes');
 const colaboradorRoutes = require('./routes/colaborador.routes');
+const folhaRoutes = require('./modules/folha/folha.routes');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -126,6 +127,7 @@ app.use('/api/comprovantes-ausencia', comprovanteAusenciaRoutes);
 app.use('/api/feriados', feriadoRoutes);
 app.use('/api/ferias', feriasRoutes);
 app.use('/api/colaborador', colaboradorRoutes);
+app.use('/api/folha', folhaRoutes);
 
 // Endpoint para diagnosticar IP de saída (egress IP)
 app.get('/api/check-ip', (req, res) => {
@@ -297,9 +299,12 @@ app.use((err, req, res, next) => {
   });
 });
 
+const { iniciarJobVerificacaoContratos } = require('./services/contractExpiry.service');
+
 app.listen(PORT, () => {
   console.log(`🚀 PontoFácil Backend rodando na porta ${PORT}`);
   console.log(`📊 Ambiente: ${process.env.NODE_ENV}`);
+  iniciarJobVerificacaoContratos();
   if (!process.env.JWT_SECRET || !process.env.JWT_REFRESH_SECRET) {
     console.error('⚠️  JWT_SECRET ou JWT_REFRESH_SECRET ausentes — /api/auth/login retornará erro 500.');
   }

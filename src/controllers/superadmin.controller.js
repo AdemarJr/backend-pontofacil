@@ -6,12 +6,14 @@ const { frontendBase } = require('../services/passwordReset.service');
 const { sendPasswordResetEmail, sendFirstAccessInviteEmail } = require('../services/supabaseAuth.service');
 
 const prisma = require('../infra/prisma');
+const { resolverDadosContrato, diasAteExpiracao } = require('../shared/contractPeriod');
 
 async function listarTenants(req, res, next) {
   try {
     const tenants = await prisma.tenant.findMany({
       include: {
         _count: { select: { usuarios: true, registros: true } },
+        features: true,
         usuarios: {
           where: { role: 'ADMIN' },
           select: { id: true, nome: true, email: true },
@@ -67,6 +69,9 @@ async function criarTenant(req, res, next) {
           telefone: telefone || null,
           plano: plano || 'BASICO',
         },
+      });
+      await tx.tenantFeature.create({
+        data: { tenantId: t.id, payrollModuleEnabled: false },
       });
       const u = await tx.usuario.create({
         data: {
@@ -145,6 +150,57 @@ async function atualizarTenant(req, res, next) {
     }
     next(err);
   }
+}
+
+async function atualizarFeatures(req, res, next) {
+  try {
+    const { id: tenantId } = req.params;
+    const { payrollModuleEnabled } = req.body;
+
+    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
+    if (!tenant) return res.status(404).json({ error: 'Empresa não encontrada' });
+
+    const features = await prisma.tenantFeature.upsert({
+      where: { tenantId },
+      create: { tenantId, payrollModuleEnabled: Boolean(payrollModuleEnabled) },
+      update: { payrollModuleEnabled: Boolean(payrollModuleEnabled) },
+    });
+
+    res.json(features);
+  } catch (err) { next(err); }
+}
+
+async function atualizarContrato(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { contractStartDate, periodoContrato } = req.body;
+
+    let dadosContrato;
+    try {
+      dadosContrato = resolverDadosContrato({ contractStartDate, periodoContrato });
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+
+    const existente = await prisma.tenant.findUnique({ where: { id } });
+    if (!existente) return res.status(404).json({ error: 'Empresa não encontrada' });
+
+    const tenant = await prisma.tenant.update({
+      where: { id },
+      data: dadosContrato,
+    });
+
+    // Se reativou contrato e empresa estava suspensa só por vencimento, reativa
+    if (tenant.status === 'SUSPENSO' && tenant.periodoContrato && tenant.contractEndDate) {
+      const dias = diasAteExpiracao(tenant.contractEndDate);
+      if (dias != null && dias >= 0) {
+        await prisma.tenant.update({ where: { id }, data: { status: 'ATIVO' } });
+        tenant.status = 'ATIVO';
+      }
+    }
+
+    res.json(tenant);
+  } catch (err) { next(err); }
 }
 
 /** Cadastra um usuário ADMIN em uma empresa já existente (login: e-mail + senha no /login) */
@@ -347,6 +403,8 @@ module.exports = {
   resetSenhaAdminTenant,
   reenviarConviteAdminTenant,
   atualizarTenant,
+  atualizarFeatures,
+  atualizarContrato,
   atualizarStatus,
   stats,
   limparRegistrosTenant,

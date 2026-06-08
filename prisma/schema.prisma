@@ -42,8 +42,17 @@ model Tenant {
   trabalhoMinimoAntesSaidaMinutos Int @default(30)
   intervaloMinimoAlmocoMinutos    Int @default(30)
 
+  /// Vigência do contrato SaaS (TTL de acesso). Null = sem limite (legado/produção).
+  periodoContrato   PeriodoContratoTenant?
+  contractStartDate DateTime?
+  contractEndDate   DateTime? // calculado automaticamente a partir do período
+
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+
+  features       TenantFeature?
+  folhaConfig    FolhaConfig?
+  folhaRuns      FolhaRun[]
 
   usuarios       Usuario[]
   registros      RegistroPonto[]
@@ -91,6 +100,12 @@ enum StatusTenant {
   CANCELADO
 }
 
+enum PeriodoContratoTenant {
+  MENSAL
+  SEMESTRAL
+  ANUAL
+}
+
 // ---- USUÁRIOS ----
 model Usuario {
   id          String   @id @default(uuid())
@@ -128,8 +143,24 @@ model Usuario {
   /// Se true, o colaborador pode bater ponto de qualquer lugar (sem validar cerca virtual).
   isentoGeofence Boolean @default(false)
 
+  /// Dados para folha de pagamento
+  cpf                  String?
+  pis                  String?
+  matricula            String?
+  tipoContrato         TipoContrato @default(CLT)
+  salarioBase          Decimal?     @db.Decimal(12, 2)
+  categoriaProfissional String?
+  dependentesIrrf      Int          @default(0)
+  contaBanco           String?
+  contaAgencia         String?
+  contaNumero          String?
+  contaTipo            TipoContaBancaria?
+
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  holerites   Holerite[]
+  folhaRunsFechados FolhaRun[] @relation("FolhaRunFechadaPor")
 
   registros   RegistroPonto[]
   escalas     Escala[]
@@ -155,6 +186,109 @@ enum Role {
   SUPER_ADMIN
   ADMIN       // Gerente da empresa
   COLABORADOR
+}
+
+enum TipoContrato {
+  CLT
+  ESTAGIO
+  PJ
+}
+
+enum TipoContaBancaria {
+  CORRENTE
+  POUPANCA
+}
+
+enum ModoBancoHoras {
+  COMPENSAR
+  PAGAR
+}
+
+enum StatusFolhaRun {
+  RASCUNHO
+  CALCULADA
+  FECHADA
+  PAGA
+}
+
+// ---- FEATURE FLAGS POR TENANT ----
+model TenantFeature {
+  tenantId             String   @id
+  tenant               Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  payrollModuleEnabled Boolean  @default(false)
+  updatedAt            DateTime @updatedAt
+
+  @@map("tenant_features")
+}
+
+// ---- CONFIGURAÇÃO DE FOLHA POR EMPRESA ----
+model FolhaConfig {
+  tenantId                  String         @id
+  tenant                    Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  modoBancoHoras            ModoBancoHoras @default(COMPENSAR)
+  heDiaUtilPercent          Int            @default(50)
+  heDomingoFeriadoPercent   Int            @default(100)
+  adicionalNoturnoPercent   Int            @default(20)
+  toleranciaAtrasoMin       Int?
+  pagarDSR                  Boolean        @default(true)
+  permitirFolhaSemAssinatura Boolean       @default(false)
+  tabelasVersao             String?
+  tabelasSnapshot           Json?
+  /// Dados bancários da empresa (CNAB)
+  bancoCodigo               String?
+  bancoAgencia              String?
+  bancoConta                String?
+  bancoConvenio             String?
+  createdAt                 DateTime       @default(now())
+  updatedAt                 DateTime       @updatedAt
+
+  @@map("folha_config")
+}
+
+// ---- EXECUÇÃO MENSAL DE FOLHA ----
+model FolhaRun {
+  id                     String         @id @default(uuid())
+  tenantId               String
+  tenant                 Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  mes                    Int
+  ano                    Int
+  status                 StatusFolhaRun @default(RASCUNHO)
+  calculadaEm            DateTime?
+  fechadaEm              DateTime?
+  fechadaPorId           String?
+  fechadaPor             Usuario?       @relation("FolhaRunFechadaPor", fields: [fechadaPorId], references: [id], onDelete: SetNull)
+  bloqueadaPorPendencias Json?
+
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+
+  holerites              Holerite[]
+
+  @@unique([tenantId, mes, ano])
+  @@index([tenantId, mes, ano])
+  @@map("folha_runs")
+}
+
+// ---- HOLERITE POR COLABORADOR ----
+model Holerite {
+  id          String   @id @default(uuid())
+  folhaRunId  String
+  folhaRun    FolhaRun @relation(fields: [folhaRunId], references: [id], onDelete: Cascade)
+  usuarioId   String
+  usuario     Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  proventos   Json
+  descontos   Json
+  bases       Json
+  liquido     Decimal  @db.Decimal(12, 2)
+  pdfKey      String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([folhaRunId, usuarioId])
+  @@index([folhaRunId])
+  @@index([usuarioId])
+  @@map("holerites")
 }
 
 // ---- REGISTROS DE PONTO ----

@@ -26,6 +26,10 @@ router.get('/meu', autenticar, async (req, res, next) => {
         toleranciaMinutos: true,
         trabalhoMinimoAntesSaidaMinutos: true,
         intervaloMinimoAlmocoMinutos: true,
+        periodoContrato: true,
+        contractStartDate: true,
+        contractEndDate: true,
+        features: { select: { payrollModuleEnabled: true } },
       }
     });
     res.json(tenant);
