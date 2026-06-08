@@ -6,6 +6,8 @@ const { requestForgotByEmail, resetPasswordWithToken, frontendBase } = require('
 const { sendPasswordResetEmail, updatePasswordWithToken, sendNewManagerInviteEmail } = require('../services/supabaseAuth.service');
 
 const prisma = require('../infra/prisma');
+const { isContractExpired, contractExpiredPayload } = require('../shared/contractCheck');
+const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
 
 function handlePrismaAuthError(err, res, next) {
   if (err.code === 'P1001' || err.code === 'P1017') {
@@ -77,6 +79,9 @@ async function loginEmail(req, res, next) {
             geofenceAtivo: true,
             permitirTotem: true,
             permitirMeuPonto: true,
+            periodoContrato: true,
+            contractEndDate: true,
+            features: { select: { payrollModuleEnabled: true } },
           },
         },
       }
@@ -87,10 +92,15 @@ async function loginEmail(req, res, next) {
       return res.status(403).json({ error: 'Empresa com acesso suspenso' });
     }
 
+    if (isContractExpired(usuario.tenant)) {
+      return res.status(403).json(contractExpiredPayload(usuario.tenant));
+    }
+
     const hashLogin = usuario.senhaHash || usuario.pinHash;
     const valido = await bcrypt.compare(senha, hashLogin);
     if (!valido) return res.status(401).json({ error: 'Credenciais inválidas' });
 
+    const features = await lerFeaturesDoTenant(usuario.tenantId);
     const tokens = gerarTokens({ id: usuario.id, tenantId: usuario.tenantId, role: usuario.role });
     return res.json({
       ...tokens,
@@ -99,8 +109,11 @@ async function loginEmail(req, res, next) {
         nome: usuario.nome,
         email: usuario.email,
         role: usuario.role,
-        tenant: usuario.tenant,
-      }
+        tenant: {
+          ...usuario.tenant,
+          features,
+        },
+      },
     });
   } catch (err) {
     return handlePrismaAuthError(err, res, next);
