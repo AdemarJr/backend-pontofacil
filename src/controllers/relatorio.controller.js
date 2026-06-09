@@ -886,17 +886,20 @@ async function bancoHorasResumo(req, res, next) {
       totalEsperadoMin: u.totalEsperadoMin,
       saldoMesMin: u.saldoMesMin,
       horaExtraMesMin: u.horaExtraMesMin,
+      heDiaUtilMin: u.heDiaUtilMin,
+      heSemanalMin: u.heSemanalMin,
       deficitMesMin: u.deficitMesMin,
       totalHoras: u.totalHoras,
       horaExtraMes: u.horaExtraMes,
       saldoMes: u.saldoMes,
       diasResumo: u.resumo,
+      clt: u.clt,
     }));
 
     res.json({
       periodo: { mes: mesNum, ano: anoNum },
       obs:
-        'Saldo = trabalhado − esperado. O esperado conta apenas dias úteis devidos; folgas (semanais ou avulsas), feriados, férias, faltas justificadas e dias futuros têm esperado 0.',
+        'Saldo = trabalhado − esperado. HE inclui excedente diário (acima de 8h CLT) e semanal (acima de 44h). O esperado conta apenas dias úteis devidos; folgas, feriados, férias e justificadas têm esperado 0.',
       resumo: lista,
     });
   } catch (err) {

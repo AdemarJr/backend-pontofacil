@@ -6,6 +6,12 @@ const {
   fmtTime,
   pad2,
 } = require('../../utils/espelhoCalculo');
+const {
+  cltOptsFromTenant,
+  horasNormaisDiaMin,
+  semanaISOKey,
+  calcularHeSemanal,
+} = require('../../shared/cltJornada');
 const prisma = require('../../infra/prisma');
 
 const SELECT_REGISTRO_ESPELHO = {
@@ -95,7 +101,13 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
   const ultimoDia = diasMes[diasMes.length - 1];
 
   const [tenant, colaboradores] = await Promise.all([
-    prisma.tenant.findUnique({ where: { id: tenantId }, select: { toleranciaMinutos: true } }),
+    prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: {
+        toleranciaMinutos: true,
+        intervaloMinimoAlmocoMinutos: true,
+      },
+    }),
     prisma.usuario.findMany({
       where: {
         tenantId,
@@ -113,6 +125,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
     }),
   ]);
   const tol = tenant?.toleranciaMinutos ?? 5;
+  const clt = cltOptsFromTenant(tenant);
 
   if (colaboradores.length === 0) return {};
 
@@ -217,7 +230,9 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       saldoMes: '00:00',
       heDiaUtilMin: 0,
       heDomingoFeriadoMin: 0,
+      heSemanalMin: 0,
       minutosNoturnos: 0,
+      clt: clt.ativo ? { ativo: true, violacoes: { intervalo: 0, jornada8h: 0, semanal44h: 0 } } : { ativo: false },
       resumo: {
         diasUteis: 0,
         trabalhados: 0,
@@ -241,6 +256,9 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
     let heDiaUtilMin = 0;
     let heDomingoFeriadoMin = 0;
     let minutosNoturnos = 0;
+    const normaisPorSemana = {};
+    let violacoesIntervalo = 0;
+    let violacoesJornada8h = 0;
     const listaEsc = escalasPorUsuario[uid] || [];
     const temEscala = listaEsc.length > 0;
     const meta = metaPorUsuario[uid] || {};
@@ -255,6 +273,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         escala: escalaDia || undefined,
         toleranciaMinutos: tol,
         dataRef: dia,
+        clt: clt.ativo ? clt : null,
       });
       const minutos = calc.minutosTrabalhados;
 
@@ -301,10 +320,18 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       totalEsperadoMin += espMin;
 
       let flags = calc.flags;
-      let extrasMinDia = calc.extrasMin;
+      let extrasMinDia = clt.ativo ? calc.extrasEfetivoMin : calc.extrasMin;
       if (esperadoZero) {
         flags = { ...flags, faltandoMarcacao: false };
         extrasMinDia = Math.max(0, minutos);
+      }
+
+      if (clt.ativo && diaExigeJornada && minutos > 0) {
+        const wk = semanaISOKey(dia);
+        const normais = horasNormaisDiaMin(minutos, clt.limiteDiarioMin);
+        normaisPorSemana[wk] = (normaisPorSemana[wk] || 0) + normais;
+        if (flags.intervaloInsuficiente || flags.intervaloObrigatorioAusente) violacoesIntervalo += 1;
+        if (flags.jornadaAcimaLimiteLegal) violacoesJornada8h += 1;
       }
 
       if (ehDomingo || ehFeriadoSuspende) {
@@ -338,6 +365,8 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         horasTrabalhadas: fmtHours(minutos),
         extras: fmtHours(extrasMinDia),
         extrasMin: extrasMinDia,
+        extrasCltMin: calc.extrasCltMin || 0,
+        intervaloMinimo: calc.intervaloMinimo,
         intervaloMin: calc.intervaloMin,
         intervalo: calc.intervaloMin == null ? '' : fmtHours(calc.intervaloMin),
         marcacoes: {
@@ -377,6 +406,15 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       totalExtras += extrasMinDia;
     }
 
+    let heSemanalMin = 0;
+    let semanasCLT = {};
+    if (clt.ativo) {
+      const heSem = calcularHeSemanal(normaisPorSemana);
+      heSemanalMin = heSem.totalHeSemanalMin;
+      semanasCLT = heSem.porSemana;
+      if (heSemanalMin > 0) heDiaUtilMin += heSemanalMin;
+    }
+
     const horaExtraMesMin = Math.max(0, totalMinutos - totalEsperadoMin);
     const deficitMesMin = Math.max(0, totalEsperadoMin - totalMinutos);
 
@@ -391,7 +429,19 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
     porUsuario[uid].saldoMes = fmtHours(totalMinutos - totalEsperadoMin);
     porUsuario[uid].heDiaUtilMin = heDiaUtilMin;
     porUsuario[uid].heDomingoFeriadoMin = heDomingoFeriadoMin;
+    porUsuario[uid].heSemanalMin = heSemanalMin;
     porUsuario[uid].minutosNoturnos = minutosNoturnos;
+    if (clt.ativo) {
+      porUsuario[uid].clt = {
+        ativo: true,
+        semanas: semanasCLT,
+        violacoes: {
+          intervalo: violacoesIntervalo,
+          jornada8h: violacoesJornada8h,
+          semanal44h: heSemanalMin > 0 ? 1 : 0,
+        },
+      };
+    }
   }
 
   return porUsuario;
