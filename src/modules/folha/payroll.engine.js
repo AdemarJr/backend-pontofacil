@@ -1,4 +1,5 @@
 // src/modules/folha/payroll.engine.js
+const { HORAS_MENSAIS_DIVISOR } = require('../../shared/cltJornada');
 const tabelas2025 = require('./tabelas/2025.json');
 const { calcularINSS } = require('./payroll.inss');
 const { calcularIRRF } = require('./payroll.irrf');
@@ -14,7 +15,7 @@ function toNumber(val) {
 }
 
 function valorHora(salario) {
-  return salario / 220;
+  return salario / HORAS_MENSAIS_DIVISOR;
 }
 
 function rubrica(codigo, descricao, referencia, valor) {
