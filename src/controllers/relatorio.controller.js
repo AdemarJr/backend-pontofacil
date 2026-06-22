@@ -5,8 +5,10 @@ const PDFDocument = require('pdfkit');
 const crypto = require('crypto');
 const {
   calcularDia,
+  diaSemanaAbrev,
   escalaParaDia,
   fmtHours,
+  formatarDataBR,
   fmtTime,
   pad2,
   parseHoraMinutos,
@@ -212,6 +214,8 @@ function buildEspelhoRows(relatorio, periodo) {
       rows.push({
         periodo: `${pad2(periodo.mes)}/${periodo.ano}`,
         dia,
+        dataFormatada: formatarDataBR(dia),
+        diaSemana: diaSemanaAbrev(dia),
         nome: item.usuario?.nome ?? '',
         cargo: item.usuario?.cargo ?? '',
         departamento: item.usuario?.departamento ?? '',
@@ -248,6 +252,8 @@ function rowsToCsv(rows) {
   const headers = [
     'periodo',
     'dia',
+    'dataFormatada',
+    'diaSemana',
     'nome',
     'cargo',
     'departamento',
@@ -287,6 +293,91 @@ function rowsToCsv(rows) {
   return lines.join('\n');
 }
 
+const ESPELHO_EXPORT_XLSX_COLUMNS = [
+  { header: 'Período', key: 'periodo', width: 10 },
+  { header: 'Data (ISO)', key: 'dia', width: 12 },
+  { header: 'Data', key: 'dataFormatada', width: 12 },
+  { header: 'Dia sem.', key: 'diaSemana', width: 8 },
+  { header: 'Nome', key: 'nome', width: 28 },
+  { header: 'Cargo', key: 'cargo', width: 16 },
+  { header: 'Departamento', key: 'departamento', width: 18 },
+  { header: 'Status do dia', key: 'status', width: 18 },
+  { header: 'Entrada', key: 'entrada', width: 10 },
+  { header: 'Origem (Entrada)', key: 'origemEntrada', width: 16 },
+  { header: 'Saída Almoço', key: 'saidaAlmoco', width: 12 },
+  { header: 'Origem (Saída Almoço)', key: 'origemSaidaAlmoco', width: 20 },
+  { header: 'Retorno Almoço', key: 'retornoAlmoco', width: 13 },
+  { header: 'Origem (Retorno)', key: 'origemRetornoAlmoco', width: 18 },
+  { header: 'Saída', key: 'saida', width: 10 },
+  { header: 'Origem (Saída)', key: 'origemSaida', width: 16 },
+  { header: 'Entrada esperada (escala)', key: 'entradaEsperada', width: 16 },
+  { header: 'Saída esperada (escala)', key: 'saidaEsperada', width: 16 },
+  { header: 'Carga prevista (h)', key: 'cargaHorariaPrevista', width: 12 },
+  { header: 'Intervalo', key: 'intervalo', width: 10 },
+  { header: 'Horas trabalhadas', key: 'horasTrabalhadas', width: 14 },
+  { header: 'Extras no dia', key: 'extras', width: 12 },
+  { header: 'Contexto (feriado/férias)', key: 'contextoDia', width: 28 },
+  { header: 'Faltando marcação', key: 'faltandoMarcacao', width: 16 },
+  { header: 'Intervalo insuficiente', key: 'intervaloInsuficiente', width: 18 },
+  { header: 'Jornada excedida', key: 'jornadaExcedida', width: 14 },
+  { header: 'Entrada atrasada', key: 'entradaAtrasada', width: 14 },
+  { header: 'Saída antecipada', key: 'saidaAntecipada', width: 14 },
+  { header: 'Almoço fora da janela', key: 'almocoForaJanela', width: 18 },
+  { header: 'Saldo dia', key: 'saldoDia', width: 12 },
+];
+
+function renderEspelhoPdf(doc, rows, periodoLabel) {
+  doc.fontSize(14).text('Espelho de Ponto', { align: 'left' });
+  doc.fontSize(10).text(`Período: ${periodoLabel}`, { align: 'left' });
+  doc.moveDown(0.5);
+
+  const headers = ['Data', 'Sem.', 'Nome', 'Status', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
+  const colW = [44, 22, 92, 58, 34, 34, 34, 34, 68, 68];
+  const startX = doc.x;
+  let y = doc.y;
+
+  function rowLine(vals, bold) {
+    let x = startX;
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7);
+    for (let i = 0; i < vals.length; i++) {
+      doc.text(String(vals[i] ?? ''), x, y, { width: colW[i], ellipsis: true });
+      x += colW[i];
+    }
+    y += 11;
+    if (y > doc.page.height - 40) {
+      doc.addPage();
+      y = doc.y;
+    }
+  }
+
+  rowLine(headers, true);
+  for (const r of rows) {
+    const flags = [];
+    if (r.faltandoMarcacao === 'SIM') flags.push('FALTA');
+    if (r.intervaloInsuficiente === 'SIM') flags.push('INTERV');
+    if (r.jornadaExcedida === 'SIM') flags.push('EXCED');
+    if (r.entradaAtrasada === 'SIM') flags.push('ATRASO');
+    if (r.saidaAntecipada === 'SIM') flags.push('SAIDA_ANT');
+    if (r.almocoForaJanela === 'SIM') flags.push('ALMOCO');
+    rowLine(
+      [
+        r.dataFormatada,
+        r.diaSemana,
+        r.nome,
+        r.status || '',
+        r.entrada,
+        r.saida,
+        r.horasTrabalhadas,
+        r.extras,
+        r.contextoDia || '',
+        flags.join(','),
+      ],
+      false
+    );
+  }
+  doc.end();
+}
+
 async function espelhoExport(req, res, next) {
   try {
     const { usuarioId, mes, ano, format } = req.query;
@@ -318,36 +409,7 @@ async function espelhoExport(req, res, next) {
     if (fmt === 'xlsx' || fmt === 'excel') {
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet('Espelho');
-      ws.columns = [
-        { header: 'Período', key: 'periodo', width: 10 },
-        { header: 'Dia', key: 'dia', width: 12 },
-        { header: 'Nome', key: 'nome', width: 28 },
-        { header: 'Cargo', key: 'cargo', width: 16 },
-        { header: 'Departamento', key: 'departamento', width: 18 },
-        { header: 'Status do dia', key: 'status', width: 18 },
-        { header: 'Entrada', key: 'entrada', width: 10 },
-        { header: 'Origem (Entrada)', key: 'origemEntrada', width: 16 },
-        { header: 'Saída Almoço', key: 'saidaAlmoco', width: 12 },
-        { header: 'Origem (Saída Almoço)', key: 'origemSaidaAlmoco', width: 20 },
-        { header: 'Retorno Almoço', key: 'retornoAlmoco', width: 13 },
-        { header: 'Origem (Retorno)', key: 'origemRetornoAlmoco', width: 18 },
-        { header: 'Saída', key: 'saida', width: 10 },
-        { header: 'Origem (Saída)', key: 'origemSaida', width: 16 },
-        { header: 'Entrada esperada (escala)', key: 'entradaEsperada', width: 16 },
-        { header: 'Saída esperada (escala)', key: 'saidaEsperada', width: 16 },
-        { header: 'Carga prevista (h)', key: 'cargaHorariaPrevista', width: 12 },
-        { header: 'Intervalo', key: 'intervalo', width: 10 },
-        { header: 'Horas trabalhadas', key: 'horasTrabalhadas', width: 14 },
-        { header: 'Extras no dia', key: 'extras', width: 12 },
-        { header: 'Contexto (feriado/férias)', key: 'contextoDia', width: 28 },
-        { header: 'Faltando marcação', key: 'faltandoMarcacao', width: 16 },
-        { header: 'Intervalo insuficiente', key: 'intervaloInsuficiente', width: 18 },
-        { header: 'Jornada excedida', key: 'jornadaExcedida', width: 14 },
-        { header: 'Entrada atrasada', key: 'entradaAtrasada', width: 14 },
-        { header: 'Saída antecipada', key: 'saidaAntecipada', width: 14 },
-        { header: 'Almoço fora da janela', key: 'almocoForaJanela', width: 18 },
-        { header: 'Saldo dia', key: 'saldoDia', width: 12 },
-      ];
+      ws.columns = ESPELHO_EXPORT_XLSX_COLUMNS;
       ws.addRows(rows);
       ws.getRow(1).font = { bold: true };
 
@@ -363,44 +425,7 @@ async function espelhoExport(req, res, next) {
 
       const doc = new PDFDocument({ size: 'A4', margin: 28 });
       doc.pipe(res);
-      doc.fontSize(14).text('Espelho de Ponto', { align: 'left' });
-      doc.fontSize(10).text(`Período: ${pad2(mesNum)}/${anoNum}`, { align: 'left' });
-      doc.moveDown(0.5);
-
-      const headers = ['Dia', 'Nome', 'Status', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
-      const colW = [50, 104, 66, 38, 38, 38, 38, 76, 76];
-      const startX = doc.x;
-      let y = doc.y;
-
-      function rowLine(vals, bold) {
-        let x = startX;
-        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7);
-        for (let i = 0; i < vals.length; i++) {
-          doc.text(String(vals[i] ?? ''), x, y, { width: colW[i], ellipsis: true });
-          x += colW[i];
-        }
-        y += 11;
-        if (y > doc.page.height - 40) {
-          doc.addPage();
-          y = doc.y;
-        }
-      }
-
-      rowLine(headers, true);
-      for (const r of rows) {
-        const flags = [];
-        if (r.faltandoMarcacao === 'SIM') flags.push('FALTA');
-        if (r.intervaloInsuficiente === 'SIM') flags.push('INTERV');
-        if (r.jornadaExcedida === 'SIM') flags.push('EXCED');
-        if (r.entradaAtrasada === 'SIM') flags.push('ATRASO');
-        if (r.saidaAntecipada === 'SIM') flags.push('SAIDA_ANT');
-        if (r.almocoForaJanela === 'SIM') flags.push('ALMOCO');
-        rowLine(
-          [r.dia, r.nome, r.status || '', r.entrada, r.saida, r.horasTrabalhadas, r.extras, r.contextoDia || '', flags.join(',')],
-          false
-        );
-      }
-      doc.end();
+      renderEspelhoPdf(doc, rows, `${pad2(mesNum)}/${anoNum}`);
       return;
     }
 
@@ -515,36 +540,7 @@ async function espelhoMeuExport(req, res, next) {
     if (fmt === 'xlsx' || fmt === 'excel') {
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet('Espelho');
-      ws.columns = [
-        { header: 'Período', key: 'periodo', width: 10 },
-        { header: 'Dia', key: 'dia', width: 12 },
-        { header: 'Nome', key: 'nome', width: 28 },
-        { header: 'Cargo', key: 'cargo', width: 16 },
-        { header: 'Departamento', key: 'departamento', width: 18 },
-        { header: 'Status do dia', key: 'status', width: 18 },
-        { header: 'Entrada', key: 'entrada', width: 10 },
-        { header: 'Origem (Entrada)', key: 'origemEntrada', width: 16 },
-        { header: 'Saída Almoço', key: 'saidaAlmoco', width: 12 },
-        { header: 'Origem (Saída Almoço)', key: 'origemSaidaAlmoco', width: 20 },
-        { header: 'Retorno Almoço', key: 'retornoAlmoco', width: 13 },
-        { header: 'Origem (Retorno)', key: 'origemRetornoAlmoco', width: 18 },
-        { header: 'Saída', key: 'saida', width: 10 },
-        { header: 'Origem (Saída)', key: 'origemSaida', width: 16 },
-        { header: 'Entrada esperada (escala)', key: 'entradaEsperada', width: 16 },
-        { header: 'Saída esperada (escala)', key: 'saidaEsperada', width: 16 },
-        { header: 'Carga prevista (h)', key: 'cargaHorariaPrevista', width: 12 },
-        { header: 'Intervalo', key: 'intervalo', width: 10 },
-        { header: 'Horas trabalhadas', key: 'horasTrabalhadas', width: 14 },
-        { header: 'Extras no dia', key: 'extras', width: 12 },
-        { header: 'Contexto (feriado/férias)', key: 'contextoDia', width: 28 },
-        { header: 'Faltando marcação', key: 'faltandoMarcacao', width: 16 },
-        { header: 'Intervalo insuficiente', key: 'intervaloInsuficiente', width: 18 },
-        { header: 'Jornada excedida', key: 'jornadaExcedida', width: 14 },
-        { header: 'Entrada atrasada', key: 'entradaAtrasada', width: 14 },
-        { header: 'Saída antecipada', key: 'saidaAntecipada', width: 14 },
-        { header: 'Almoço fora da janela', key: 'almocoForaJanela', width: 18 },
-        { header: 'Saldo dia', key: 'saldoDia', width: 12 },
-      ];
+      ws.columns = ESPELHO_EXPORT_XLSX_COLUMNS;
       ws.addRows(rows);
       ws.getRow(1).font = { bold: true };
 
@@ -560,44 +556,7 @@ async function espelhoMeuExport(req, res, next) {
 
       const doc = new PDFDocument({ size: 'A4', margin: 28 });
       doc.pipe(res);
-      doc.fontSize(14).text('Espelho de Ponto', { align: 'left' });
-      doc.fontSize(10).text(`Período: ${pad2(mesNum)}/${anoNum}`, { align: 'left' });
-      doc.moveDown(0.5);
-
-      const headers = ['Dia', 'Nome', 'Status', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
-      const colW = [50, 104, 66, 38, 38, 38, 38, 76, 76];
-      const startX = doc.x;
-      let y = doc.y;
-
-      function rowLine(vals, bold) {
-        let x = startX;
-        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7);
-        for (let i = 0; i < vals.length; i++) {
-          doc.text(String(vals[i] ?? ''), x, y, { width: colW[i], ellipsis: true });
-          x += colW[i];
-        }
-        y += 11;
-        if (y > doc.page.height - 40) {
-          doc.addPage();
-          y = doc.y;
-        }
-      }
-
-      rowLine(headers, true);
-      for (const r of rows) {
-        const flags = [];
-        if (r.faltandoMarcacao === 'SIM') flags.push('FALTA');
-        if (r.intervaloInsuficiente === 'SIM') flags.push('INTERV');
-        if (r.jornadaExcedida === 'SIM') flags.push('EXCED');
-        if (r.entradaAtrasada === 'SIM') flags.push('ATRASO');
-        if (r.saidaAntecipada === 'SIM') flags.push('SAIDA_ANT');
-        if (r.almocoForaJanela === 'SIM') flags.push('ALMOCO');
-        rowLine(
-          [r.dia, r.nome, r.status || '', r.entrada, r.saida, r.horasTrabalhadas, r.extras, r.contextoDia || '', flags.join(',')],
-          false
-        );
-      }
-      doc.end();
+      renderEspelhoPdf(doc, rows, `${pad2(mesNum)}/${anoNum}`);
       return;
     }
 

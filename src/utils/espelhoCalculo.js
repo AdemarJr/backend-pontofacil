@@ -35,6 +35,24 @@ function diaSemanaISO(d) {
   return day === 0 ? 7 : day;
 }
 
+const DIAS_SEMANA_ABREV = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+
+/** Abreviação do dia da semana (seg, ter, …) a partir de data ISO YYYY-MM-DD. */
+function diaSemanaAbrev(isoDate) {
+  if (!isoDate || typeof isoDate !== 'string') return '';
+  const d = new Date(isoDate + 'T12:00:00');
+  if (Number.isNaN(d.getTime())) return '';
+  return DIAS_SEMANA_ABREV[d.getDay()];
+}
+
+/** Data ISO → DD/MM/YYYY para relatórios. */
+function formatarDataBR(isoDate) {
+  if (!isoDate || typeof isoDate !== 'string') return '';
+  const [y, m, day] = isoDate.split('-');
+  if (!y || !m || !day) return isoDate;
+  return `${day}/${m}/${y}`;
+}
+
 function parseHoraMinutos(str) {
   if (!str || typeof str !== 'string') return null;
   const m = /^(\d{1,2}):(\d{2})$/.exec(str.trim());
@@ -202,9 +220,11 @@ function escalaParaDia(listaEscalasOrdenadas, dataRef) {
 
 module.exports = {
   calcularDia,
+  diaSemanaAbrev,
   diaSemanaISO,
   escalaParaDia,
   fmtHours,
+  formatarDataBR,
   fmtTime,
   minutesBetween,
   pad2,
