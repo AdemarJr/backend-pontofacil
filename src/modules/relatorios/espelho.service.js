@@ -28,6 +28,7 @@ const SELECT_REGISTRO_ESPELHO = {
 };
 
 const FOLGA_TIPO_ARQUIVO = 'FOLGA';
+const TIPOS_MARCADOR_MANUAL = ['FOLGA', 'JUSTIFICATIVA'];
 
 const STATUS_DIA = {
   TRABALHADO: 'TRABALHADO',
@@ -281,6 +282,11 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       const feriasNoDia = feriasU.find((f) => f.dataInicio <= dia && f.dataFim >= dia) || null;
       const comprovante = comprovanteNoDia(comprovantesU, dia);
       const ehFolgaComprovante = comprovante?.tipoArquivo === FOLGA_TIPO_ARQUIVO;
+      const ehMarcadorManual =
+        !!comprovante &&
+        TIPOS_MARCADOR_MANUAL.includes(comprovante.tipoArquivo) &&
+        !comprovante.arquivoKey &&
+        !comprovante.arquivoUrl;
       const admissaoOk = meta?.dataAdmissao ? fmtDateISO(meta.dataAdmissao) <= dia : true;
       const naoDemitidoNoDia = meta?.dataDemissao ? fmtDateISO(meta.dataDemissao) >= dia : true;
 
@@ -396,6 +402,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
               id: comprovante.id,
               tipo: ehFolgaComprovante ? 'FOLGA' : 'JUSTIFICADA',
               descricao: comprovante.descricao || null,
+              manual: ehMarcadorManual,
             },
           } : {}),
           ...(meta?.dataAdmissao ? { dataAdmissao: fmtDateISO(meta.dataAdmissao) } : {}),
