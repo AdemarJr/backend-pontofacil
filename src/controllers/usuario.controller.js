@@ -17,6 +17,17 @@ async function listar(req, res, next) {
         isentoGeofence: true,
         dataAdmissao: true,
         dataDemissao: true,
+        cpf: true,
+        pis: true,
+        matricula: true,
+        tipoContrato: true,
+        salarioBase: true,
+        categoriaProfissional: true,
+        dependentesIrrf: true,
+        contaBanco: true,
+        contaAgencia: true,
+        contaNumero: true,
+        contaTipo: true,
       },
       orderBy: { nome: 'asc' },
     });
@@ -43,7 +54,12 @@ async function buscarPorId(req, res, next) {
 
 async function criar(req, res, next) {
   try {
-    const { nome, email, pin, cargo, departamento, role, localRegistroId, isentoGeofence, enviarConviteEmail, dataAdmissao, dataDemissao } = req.body;
+    const {
+      nome, email, pin, cargo, departamento, role, localRegistroId, isentoGeofence,
+      enviarConviteEmail, dataAdmissao, dataDemissao,
+      cpf, pis, matricula, tipoContrato, salarioBase, categoriaProfissional,
+      dependentesIrrf, contaBanco, contaAgencia, contaNumero, contaTipo,
+    } = req.body;
 
     if (!nome || !email || !pin) {
       return res.status(400).json({ error: 'Nome, email e PIN são obrigatórios' });
@@ -80,6 +96,17 @@ async function criar(req, res, next) {
         isentoGeofence: Boolean(isentoGeofence),
         dataAdmissao: dataAdmissao ? new Date(String(dataAdmissao) + 'T12:00:00') : null,
         dataDemissao: dataDemissao ? new Date(String(dataDemissao) + 'T12:00:00') : null,
+        cpf: cpf || null,
+        pis: pis || null,
+        matricula: matricula || null,
+        tipoContrato: tipoContrato || 'CLT',
+        salarioBase: salarioBase != null && salarioBase !== '' ? Number(salarioBase) : null,
+        categoriaProfissional: categoriaProfissional || null,
+        dependentesIrrf: dependentesIrrf != null ? Number(dependentesIrrf) : 0,
+        contaBanco: contaBanco || null,
+        contaAgencia: contaAgencia || null,
+        contaNumero: contaNumero || null,
+        contaTipo: contaTipo || null,
       },
       select: { id: true, nome: true, email: true, cargo: true, role: true, createdAt: true }
     });
@@ -120,7 +147,12 @@ async function criar(req, res, next) {
 
 async function atualizar(req, res, next) {
   try {
-    const { nome, email, cargo, departamento, ativo, pin, localRegistroId, isentoGeofence, dataAdmissao, dataDemissao } = req.body;
+    const {
+      nome, email, cargo, departamento, ativo, pin, localRegistroId, isentoGeofence,
+      dataAdmissao, dataDemissao,
+      cpf, pis, matricula, tipoContrato, salarioBase, categoriaProfissional,
+      dependentesIrrf, contaBanco, contaAgencia, contaNumero, contaTipo,
+    } = req.body;
 
     const dados = {
       ...(nome && { nome }),
@@ -178,6 +210,20 @@ async function atualizar(req, res, next) {
     if (isentoGeofence !== undefined) {
       dados.isentoGeofence = Boolean(isentoGeofence);
     }
+
+    if (cpf !== undefined) dados.cpf = cpf || null;
+    if (pis !== undefined) dados.pis = pis || null;
+    if (matricula !== undefined) dados.matricula = matricula || null;
+    if (tipoContrato !== undefined) dados.tipoContrato = tipoContrato;
+    if (salarioBase !== undefined) {
+      dados.salarioBase = salarioBase == null || salarioBase === '' ? null : Number(salarioBase);
+    }
+    if (categoriaProfissional !== undefined) dados.categoriaProfissional = categoriaProfissional || null;
+    if (dependentesIrrf !== undefined) dados.dependentesIrrf = Number(dependentesIrrf) || 0;
+    if (contaBanco !== undefined) dados.contaBanco = contaBanco || null;
+    if (contaAgencia !== undefined) dados.contaAgencia = contaAgencia || null;
+    if (contaNumero !== undefined) dados.contaNumero = contaNumero || null;
+    if (contaTipo !== undefined) dados.contaTipo = contaTipo || null;
 
     if (pin) {
       if (pin.length < 4 || !/^\d+$/.test(pin)) {

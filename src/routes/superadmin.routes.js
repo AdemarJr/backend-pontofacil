@@ -8,6 +8,8 @@ const {
   resetSenhaAdminTenant,
   reenviarConviteAdminTenant,
   atualizarTenant,
+  atualizarFeatures,
+  atualizarContrato,
   atualizarStatus,
   stats,
   limparRegistrosTenant,
@@ -21,6 +23,8 @@ router.post('/tenants/:id/admin', criarAdminTenant);
 router.post('/tenants/:id/admin/:adminId/reset-senha', resetSenhaAdminTenant);
 router.post('/tenants/:id/admin/:adminId/reenviar-convite', reenviarConviteAdminTenant);
 router.put('/tenants/:id', atualizarTenant);
+router.put('/tenants/:id/features', atualizarFeatures);
+router.put('/tenants/:id/contrato', atualizarContrato);
 router.put('/tenants/:id/status', atualizarStatus);
 router.post('/tenants/:id/limpar-registros', limparRegistrosTenant);
 router.get('/stats', stats);

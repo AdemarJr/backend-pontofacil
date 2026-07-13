@@ -1,6 +1,10 @@
 /**
  * Cálculo de espelho diário: horas trabalhadas, extras, flags e comparação com escala.
  */
+const {
+  heDiariaLegalMin,
+  intervaloMinimoLegal,
+} = require('../shared/cltJornada');
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -31,6 +35,24 @@ function diaSemanaISO(d) {
   return day === 0 ? 7 : day;
 }
 
+const DIAS_SEMANA_ABREV = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
+
+/** Abreviação do dia da semana (seg, ter, …) a partir de data ISO YYYY-MM-DD. */
+function diaSemanaAbrev(isoDate) {
+  if (!isoDate || typeof isoDate !== 'string') return '';
+  const d = new Date(isoDate + 'T12:00:00');
+  if (Number.isNaN(d.getTime())) return '';
+  return DIAS_SEMANA_ABREV[d.getDay()];
+}
+
+/** Data ISO → DD/MM/YYYY para relatórios. */
+function formatarDataBR(isoDate) {
+  if (!isoDate || typeof isoDate !== 'string') return '';
+  const [y, m, day] = isoDate.split('-');
+  if (!y || !m || !day) return isoDate;
+  return `${day}/${m}/${y}`;
+}
+
 function parseHoraMinutos(str) {
   if (!str || typeof str !== 'string') return null;
   const m = /^(\d{1,2}):(\d{2})$/.exec(str.trim());
@@ -48,10 +70,10 @@ function minutosDoDia(dataHora) {
 
 /**
  * @param {Array<{tipo:string,dataHora:string|Date}>} pontos
- * @param {{ escala?: object|null, toleranciaMinutos?: number, dataRef?: string }} opts dataRef 'YYYY-MM-DD' para checar dia da semana
+ * @param {{ escala?: object|null, toleranciaMinutos?: number, dataRef?: string, clt?: object|null }} opts
  */
 function calcularDia(pontos, opts = {}) {
-  const { escala, toleranciaMinutos = 5, dataRef } = opts;
+  const { escala, toleranciaMinutos = 5, dataRef, clt = null } = opts;
 
   const sorted = [...pontos].sort((a, b) => new Date(a.dataHora) - new Date(b.dataHora));
   const getTipo = (t) => String(t || '').toUpperCase();
@@ -74,7 +96,7 @@ function calcularDia(pontos, opts = {}) {
     minutosTrabalhados = minutesBetween(entrada.dataHora, saida.dataHora);
   }
 
-  const intervaloMinimo =
+  const intervaloEscala =
     escala && escala.intervaloMinutos != null ? escala.intervaloMinutos : 60;
 
   const jornadaPadraoMin =
@@ -85,6 +107,28 @@ function calcularDia(pontos, opts = {}) {
   const extrasMin = Math.max(0, minutosTrabalhados - jornadaPadraoMin);
   const deficitMin = Math.max(0, jornadaPadraoMin - minutosTrabalhados);
 
+  let intervaloMinimo = intervaloEscala;
+  let extrasEfetivoMin = extrasMin;
+  let extrasCltMin = 0;
+  let intervaloObrigatorioAusente = false;
+  let jornadaAcimaLimiteLegal = false;
+
+  if (clt?.ativo) {
+    const limiteDiario = clt.limiteDiarioMin ?? 8 * 60;
+    extrasCltMin = heDiariaLegalMin(minutosTrabalhados, limiteDiario);
+    extrasEfetivoMin = Math.max(extrasMin, extrasCltMin);
+    jornadaAcimaLimiteLegal = minutosTrabalhados > limiteDiario;
+
+    const minLegal = intervaloMinimoLegal(jornadaPadraoMin, {
+      intervaloCCTMinutos: clt.intervaloCCTMinutos,
+    });
+    intervaloMinimo = Math.max(intervaloEscala, minLegal);
+
+    if (jornadaPadraoMin > 6 * 60 && intervaloMin == null && minutosTrabalhados > 0) {
+      intervaloObrigatorioAusente = true;
+    }
+  }
+
   const faltandoMarcacao =
     !entrada ||
     !saida ||
@@ -92,7 +136,7 @@ function calcularDia(pontos, opts = {}) {
 
   const intervaloInsuficiente = intervaloMin != null && intervaloMin < intervaloMinimo;
 
-  const jornadaExcedida = minutosTrabalhados > jornadaPadraoMin;
+  const jornadaExcedida = minutosTrabalhados > jornadaPadraoMin || jornadaAcimaLimiteLegal;
 
   let entradaAtrasada = false;
   let saidaAntecipada = false;
@@ -142,11 +186,16 @@ function calcularDia(pontos, opts = {}) {
     minutosTrabalhados,
     jornadaContratualMin: jornadaPadraoMin,
     extrasMin,
+    extrasEfetivoMin,
+    extrasCltMin,
     deficitMin,
+    intervaloMinimo,
     flags: {
       faltandoMarcacao,
       intervaloInsuficiente,
+      intervaloObrigatorioAusente,
       jornadaExcedida,
+      jornadaAcimaLimiteLegal,
       entradaAtrasada,
       saidaAntecipada,
       almocoForaDaJanela,
@@ -171,9 +220,11 @@ function escalaParaDia(listaEscalasOrdenadas, dataRef) {
 
 module.exports = {
   calcularDia,
+  diaSemanaAbrev,
   diaSemanaISO,
   escalaParaDia,
   fmtHours,
+  formatarDataBR,
   fmtTime,
   minutesBetween,
   pad2,

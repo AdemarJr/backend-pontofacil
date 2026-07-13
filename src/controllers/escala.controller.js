@@ -1,6 +1,7 @@
 const { PrismaClient } = require('@prisma/client');
 
 const prisma = require('../infra/prisma');
+const { validarEscalaCLT } = require('../shared/cltJornada');
 
 const DIAS_VALIDOS = [1, 2, 3, 4, 5, 6, 7];
 
@@ -72,6 +73,19 @@ async function criar(req, res, next) {
     });
     if (!u) return res.status(404).json({ error: 'Colaborador não encontrado' });
 
+    const carga = cargaHorariaDiaria != null ? Number(cargaHorariaDiaria) : 8;
+    const intervalo = intervaloMinutos != null ? Number(intervaloMinutos) : 60;
+    const dias = diasSemana.map((d) => Number(d));
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: req.tenantId },
+      select: { intervaloMinimoAlmocoMinutos: true },
+    });
+    const intervaloCCT = tenant?.intervaloMinimoAlmocoMinutos != null
+      ? Math.max(30, Math.min(60, tenant.intervaloMinimoAlmocoMinutos))
+      : 60;
+    const errClt = validarEscalaCLT(carga, dias, intervalo, intervaloCCT);
+    if (errClt) return res.status(400).json({ error: errClt });
+
     const escala = await prisma.escala.create({
       data: {
         tenantId: req.tenantId,
@@ -79,10 +93,9 @@ async function criar(req, res, next) {
         nome: String(nome).trim(),
         horaInicio: horaInicio.trim(),
         horaFim: horaFim.trim(),
-        diasSemana: diasSemana.map((d) => Number(d)),
-        cargaHorariaDiaria:
-          cargaHorariaDiaria != null ? Number(cargaHorariaDiaria) : 8,
-        intervaloMinutos: intervaloMinutos != null ? Number(intervaloMinutos) : 60,
+        diasSemana: dias,
+        cargaHorariaDiaria: carga,
+        intervaloMinutos: intervalo,
         horaSaidaAlmoco: horaSaidaAlmoco ? horaSaidaAlmoco.trim() : null,
         horaRetornoAlmoco: horaRetornoAlmoco ? horaRetornoAlmoco.trim() : null,
         ativo: ativo !== false,
@@ -137,6 +150,19 @@ async function atualizar(req, res, next) {
       dados.horaRetornoAlmoco = horaRetornoAlmoco ? String(horaRetornoAlmoco).trim() : null;
     }
     if (ativo !== undefined) dados.ativo = Boolean(ativo);
+
+    const cargaFinal = dados.cargaHorariaDiaria ?? existente.cargaHorariaDiaria;
+    const diasFinal = dados.diasSemana ?? existente.diasSemana;
+    const intervaloFinal = dados.intervaloMinutos ?? existente.intervaloMinutos;
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: req.tenantId },
+      select: { intervaloMinimoAlmocoMinutos: true },
+    });
+    const intervaloCCT = tenant?.intervaloMinimoAlmocoMinutos != null
+      ? Math.max(30, Math.min(60, tenant.intervaloMinimoAlmocoMinutos))
+      : 60;
+    const errClt = validarEscalaCLT(cargaFinal, diasFinal, intervaloFinal, intervaloCCT);
+    if (errClt) return res.status(400).json({ error: errClt });
 
     const escala = await prisma.escala.update({
       where: { id },

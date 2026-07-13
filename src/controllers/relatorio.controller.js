@@ -5,14 +5,17 @@ const PDFDocument = require('pdfkit');
 const crypto = require('crypto');
 const {
   calcularDia,
+  diaSemanaAbrev,
   escalaParaDia,
   fmtHours,
+  formatarDataBR,
   fmtTime,
   pad2,
   parseHoraMinutos,
 } = require('../utils/espelhoCalculo');
 
 const prisma = require('../infra/prisma');
+const { montarPorUsuarioEspelho, montarEspelhoMensal } = require('../modules/relatorios/espelho.service');
 
 /**
  * Campos do RegistroPonto usados pelo espelho/relatórios.
@@ -133,317 +136,6 @@ function whereRegistrosNoPeriodo({ tenantId, usuarioId, dataInicio, dataFim }) {
   };
 }
 
-/**
- * Espelho mensal completo: preenche todos os dias do mês (mesmo sem batidas),
- * aplicando feriados/férias/admissão/demissão no “esperado” e nas flags.
- */
-async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, usuarioFiltroId }) {
-  function origemDoTipoEm(pontos, tipo, dt) {
-    if (!dt) return '';
-    const t = new Date(dt).getTime();
-    const achado = pontos.find((p) => p.tipo === tipo && new Date(p.dataHora).getTime() === t);
-    return achado?.origem || '';
-  }
-
-  const diasMes = diasDoMesISO(mesNum, anoNum);
-  const primeiroDia = diasMes[0];
-  const ultimoDia = diasMes[diasMes.length - 1];
-
-  // Tenant e colaboradores são independentes → buscar em paralelo (reduz round-trips ao banco).
-  const [tenant, colaboradores] = await Promise.all([
-    prisma.tenant.findUnique({ where: { id: tenantId }, select: { toleranciaMinutos: true } }),
-    prisma.usuario.findMany({
-      where: {
-        tenantId,
-        role: 'COLABORADOR',
-        ativo: true,
-        ...(usuarioFiltroId ? { id: String(usuarioFiltroId) } : {}),
-      },
-      select: { id: true, nome: true, cargo: true, departamento: true, dataAdmissao: true, dataDemissao: true },
-      orderBy: { nome: 'asc' },
-    }),
-  ]);
-  const tol = tenant?.toleranciaMinutos ?? 5;
-
-  if (colaboradores.length === 0) {
-    return {};
-  }
-
-  const uids = colaboradores.map((u) => u.id);
-  const uidSet = new Set(uids);
-  const metaPorUsuario = Object.fromEntries(
-    colaboradores.map((u) => [u.id, { dataAdmissao: u.dataAdmissao, dataDemissao: u.dataDemissao }])
-  );
-
-  // Feriados, férias, escalas e comprovantes dependem só de uids → buscar todos em paralelo.
-  const [feriados, ferias, escalasAll, comprovantes] = await Promise.all([
-    prisma.feriado.findMany({
-      where: { tenantId, data: { gte: primeiroDia, lte: ultimoDia } },
-      select: { data: true, nome: true, suspendeExpediente: true },
-    }),
-    prisma.ferias.findMany({
-      where: {
-        tenantId,
-        usuarioId: { in: uids },
-        status: 'APROVADA',
-        AND: [{ dataInicio: { lte: ultimoDia } }, { dataFim: { gte: primeiroDia } }],
-      },
-      select: { usuarioId: true, dataInicio: true, dataFim: true, observacao: true },
-    }),
-    prisma.escala.findMany({
-      where: { tenantId, usuarioId: { in: uids }, ativo: true },
-      orderBy: { updatedAt: 'desc' },
-    }),
-    // Ausências aprovadas (atestados/folgas). Cobrem qualquer dia entre dataReferencia e dataFim (inclusive).
-    prisma.comprovanteAusencia.findMany({
-      where: {
-        tenantId,
-        usuarioId: { in: uids },
-        status: 'APROVADO',
-        dataReferencia: { lte: ultimoDia },
-        OR: [{ dataFim: null }, { dataFim: { gte: primeiroDia } }],
-      },
-      select: { id: true, usuarioId: true, dataReferencia: true, dataFim: true, descricao: true, tipoArquivo: true, arquivoKey: true, arquivoUrl: true },
-    }),
-  ]);
-
-  const feriadoPorDia = Object.fromEntries(feriados.map((f) => [f.data, f]));
-
-  const feriasPorUsuario = {};
-  for (const f of ferias) {
-    if (!feriasPorUsuario[f.usuarioId]) feriasPorUsuario[f.usuarioId] = [];
-    feriasPorUsuario[f.usuarioId].push(f);
-  }
-
-  const escalasPorUsuario = {};
-  for (const e of escalasAll) {
-    if (!escalasPorUsuario[e.usuarioId]) escalasPorUsuario[e.usuarioId] = [];
-    escalasPorUsuario[e.usuarioId].push(e);
-  }
-
-  const comprovantesPorUsuario = {};
-  for (const c of comprovantes) {
-    if (!comprovantesPorUsuario[c.usuarioId]) comprovantesPorUsuario[c.usuarioId] = [];
-    comprovantesPorUsuario[c.usuarioId].push(c);
-  }
-  const comprovanteNoDia = (lista, dia) =>
-    (lista || []).find((c) => {
-      const ini = c.dataReferencia;
-      const fim = c.dataFim || c.dataReferencia;
-      return ini <= dia && fim >= dia;
-    }) || null;
-
-  const hojeISO = fmtDateISO(new Date());
-
-  /** @type {Record<string, Record<string, any[]>>} */
-  const pontosPorUsuarioDia = {};
-  for (const r of registros) {
-    const uid = r.usuarioId;
-    if (!uidSet.has(uid)) continue;
-    const dia = fmtDateISO(r.ajuste ? r.ajuste.dataHoraNova : r.dataHora);
-    if (!pontosPorUsuarioDia[uid]) pontosPorUsuarioDia[uid] = {};
-    if (!pontosPorUsuarioDia[uid][dia]) pontosPorUsuarioDia[uid][dia] = [];
-    pontosPorUsuarioDia[uid][dia].push({
-      id: r.id,
-      tipo: r.tipo,
-      dataHora: r.ajuste ? r.ajuste.dataHoraNova : r.dataHora,
-      // Foto não é carregada no espelho (base64 ~50KB cada deixa a query lenta).
-      // Usa-se o id do registro para buscar a imagem sob demanda quando necessário.
-      fotoUrl: null,
-      origem: r.origem,
-      ajustado: !!r.ajuste,
-      motivoAjuste: r.ajuste?.motivo,
-    });
-  }
-
-  const porUsuario = {};
-  for (const u of colaboradores) {
-    porUsuario[u.id] = {
-      usuario: { id: u.id, nome: u.nome, cargo: u.cargo, departamento: u.departamento },
-      diasTrabalhados: {},
-      totalHoras: '00:00',
-      totalExtras: '00:00',
-      totalTrabalhadoMin: 0,
-      totalEsperadoMin: 0,
-      saldoMesMin: 0,
-      horaExtraMesMin: 0,
-      deficitMesMin: 0,
-      horaExtraMes: '00:00',
-      saldoMes: '00:00',
-      resumo: {
-        diasUteis: 0,
-        trabalhados: 0,
-        parciais: 0,
-        faltas: 0,
-        folgas: 0,
-        justificadas: 0,
-        feriados: 0,
-        ferias: 0,
-        emAberto: 0,
-        futuros: 0,
-      },
-    };
-  }
-
-  for (const uid of uids) {
-    let totalMinutos = 0;
-    let totalExtras = 0;
-    let totalEsperadoMin = 0;
-    const listaEsc = escalasPorUsuario[uid] || [];
-    const temEscala = listaEsc.length > 0;
-    const meta = metaPorUsuario[uid] || {};
-    const feriasU = feriasPorUsuario[uid] || [];
-    const comprovantesU = comprovantesPorUsuario[uid] || [];
-    const resumo = porUsuario[uid].resumo;
-
-    for (const dia of diasMes) {
-      const pontos = (pontosPorUsuarioDia[uid] && pontosPorUsuarioDia[uid][dia]) || [];
-      const escalaDia = escalaParaDia(listaEsc, dia);
-      const calc = calcularDia(pontos, {
-        escala: escalaDia || undefined,
-        toleranciaMinutos: tol,
-        dataRef: dia,
-      });
-      const minutos = calc.minutosTrabalhados;
-
-      const feriado = feriadoPorDia[dia];
-      const feriasNoDia = feriasU.find((f) => f.dataInicio <= dia && f.dataFim >= dia) || null;
-      const comprovante = comprovanteNoDia(comprovantesU, dia);
-      const ehFolgaComprovante = comprovante?.tipoArquivo === FOLGA_TIPO_ARQUIVO;
-      const admissaoOk = meta?.dataAdmissao ? fmtDateISO(meta.dataAdmissao) <= dia : true;
-      const naoDemitidoNoDia = meta?.dataDemissao ? fmtDateISO(meta.dataDemissao) >= dia : true;
-
-      // Um dia é "útil" (esperado trabalhar) quando: há escala e o dia está nela,
-      // OU não há escala cadastrada e é dia de semana (seg–sex). Caso contrário é folga.
-      const ehDiaUtilProgramado = temEscala
-        ? escalaDia != null
-        : (() => {
-            const dow = new Date(dia + 'T12:00:00').getDay();
-            return dow >= 1 && dow <= 5;
-          })();
-
-      const ehFuturo = dia > hojeISO;
-      const ehHoje = dia === hojeISO;
-      const temAlgumPonto = pontos.length > 0;
-
-      // Define o status do dia em ordem de prioridade.
-      let statusDia;
-      if (!admissaoOk) statusDia = STATUS_DIA.ANTES_ADMISSAO;
-      else if (!naoDemitidoNoDia) statusDia = STATUS_DIA.POS_DEMISSAO;
-      else if (feriado?.suspendeExpediente === true) statusDia = STATUS_DIA.FERIADO;
-      else if (feriasNoDia) statusDia = STATUS_DIA.FERIAS;
-      else if (comprovante) statusDia = ehFolgaComprovante ? STATUS_DIA.FOLGA : STATUS_DIA.JUSTIFICADA;
-      else if (!ehDiaUtilProgramado) statusDia = STATUS_DIA.FOLGA;
-      else if (temAlgumPonto) statusDia = calc.flags.faltandoMarcacao ? STATUS_DIA.PARCIAL : STATUS_DIA.TRABALHADO;
-      else if (ehFuturo) statusDia = STATUS_DIA.FUTURO;
-      else if (ehHoje) statusDia = STATUS_DIA.EM_ABERTO;
-      else statusDia = STATUS_DIA.FALTA;
-
-      // Só dia útil cumprido/devido conta como esperado. Folga/feriado/férias/justificada/futuro = 0.
-      const diaExigeJornada =
-        statusDia === STATUS_DIA.TRABALHADO ||
-        statusDia === STATUS_DIA.PARCIAL ||
-        statusDia === STATUS_DIA.FALTA ||
-        statusDia === STATUS_DIA.EM_ABERTO;
-
-      const espMinBase = escalaDia ? Math.round(Number(escalaDia.cargaHorariaDiaria) * 60) : 8 * 60;
-      const espMin = diaExigeJornada ? espMinBase : 0;
-      const esperadoZero = espMin === 0;
-      totalEsperadoMin += espMin;
-
-      let flags = calc.flags;
-      let extrasMinDia = calc.extrasMin;
-      if (esperadoZero) {
-        // Trabalho em dia sem jornada esperada (folga/feriado/férias) entra como extra.
-        flags = { ...flags, faltandoMarcacao: false };
-        extrasMinDia = Math.max(0, minutos);
-      }
-
-      // Contadores do resumo mensal.
-      if (diaExigeJornada) resumo.diasUteis += 1;
-      switch (statusDia) {
-        case STATUS_DIA.TRABALHADO: resumo.trabalhados += 1; break;
-        case STATUS_DIA.PARCIAL: resumo.parciais += 1; break;
-        case STATUS_DIA.FALTA: resumo.faltas += 1; break;
-        case STATUS_DIA.FOLGA: resumo.folgas += 1; break;
-        case STATUS_DIA.JUSTIFICADA: resumo.justificadas += 1; break;
-        case STATUS_DIA.FERIADO: resumo.feriados += 1; break;
-        case STATUS_DIA.FERIAS: resumo.ferias += 1; break;
-        case STATUS_DIA.EM_ABERTO: resumo.emAberto += 1; break;
-        case STATUS_DIA.FUTURO: resumo.futuros += 1; break;
-        default: break;
-      }
-
-      porUsuario[uid].diasTrabalhados[dia] = {
-        pontos,
-        statusDia,
-        statusLabel: STATUS_DIA_LABEL[statusDia] || statusDia,
-        minutosTrabalhados: minutos,
-        horasTrabalhadas: fmtHours(minutos),
-        extras: fmtHours(extrasMinDia),
-        intervaloMin: calc.intervaloMin,
-        intervalo: calc.intervaloMin == null ? '' : fmtHours(calc.intervaloMin),
-        marcacoes: {
-          entrada: fmtTime(calc.entrada),
-          saidaAlmoco: fmtTime(calc.saidaAlmoco),
-          retornoAlmoco: fmtTime(calc.retornoAlmoco),
-          saida: fmtTime(calc.saida),
-        },
-        origens: {
-          entrada: origemDoTipoEm(pontos, 'ENTRADA', calc.entrada),
-          saidaAlmoco: origemDoTipoEm(pontos, 'SAIDA_ALMOCO', calc.saidaAlmoco),
-          retornoAlmoco: origemDoTipoEm(pontos, 'RETORNO_ALMOCO', calc.retornoAlmoco),
-          saida: origemDoTipoEm(pontos, 'SAIDA', calc.saida),
-        },
-        flags,
-        esperado: calc.esperado,
-        jornadaContratualMin: calc.jornadaContratualMin,
-        saldoDiaMin: minutos - espMin,
-        contextoDia: {
-          suspendeExpediente: esperadoZero,
-          ...(feriado
-            ? { feriado: { nome: feriado.nome, suspendeExpediente: feriado.suspendeExpediente } }
-            : {}),
-          ...(feriasNoDia ? { ferias: { dataInicio: feriasNoDia.dataInicio, dataFim: feriasNoDia.dataFim } } : {}),
-          ...(comprovante
-            ? {
-                ausencia: {
-                  id: comprovante.id,
-                  tipo: ehFolgaComprovante ? 'FOLGA' : 'JUSTIFICADA',
-                  descricao: comprovante.descricao || null,
-                  // "manual" = criado pelo gestor (folga/justificativa sem documento) → pode ser removido.
-                  manual:
-                    (comprovante.tipoArquivo === 'FOLGA' || comprovante.tipoArquivo === 'JUSTIFICATIVA') &&
-                    !comprovante.arquivoKey &&
-                    !comprovante.arquivoUrl,
-                },
-              }
-            : {}),
-          ...(meta?.dataAdmissao ? { dataAdmissao: fmtDateISO(meta.dataAdmissao) } : {}),
-          ...(meta?.dataDemissao ? { dataDemissao: fmtDateISO(meta.dataDemissao) } : {}),
-        },
-      };
-      totalMinutos += minutos;
-      totalExtras += extrasMinDia;
-    }
-
-    const horaExtraMesMin = Math.max(0, totalMinutos - totalEsperadoMin);
-    const deficitMesMin = Math.max(0, totalEsperadoMin - totalMinutos);
-
-    porUsuario[uid].totalHoras = fmtHours(totalMinutos);
-    porUsuario[uid].totalExtras = fmtHours(totalExtras);
-    porUsuario[uid].totalTrabalhadoMin = totalMinutos;
-    porUsuario[uid].totalEsperadoMin = totalEsperadoMin;
-    porUsuario[uid].saldoMesMin = totalMinutos - totalEsperadoMin;
-    porUsuario[uid].horaExtraMesMin = horaExtraMesMin;
-    porUsuario[uid].deficitMesMin = deficitMesMin;
-    porUsuario[uid].horaExtraMes = fmtHours(horaExtraMesMin);
-    porUsuario[uid].saldoMes = fmtHours(totalMinutos - totalEsperadoMin);
-  }
-
-  return porUsuario;
-}
-
 async function espelhoPonto(req, res, next) {
   try {
     const { usuarioId, mes, ano } = req.query;
@@ -522,6 +214,8 @@ function buildEspelhoRows(relatorio, periodo) {
       rows.push({
         periodo: `${pad2(periodo.mes)}/${periodo.ano}`,
         dia,
+        dataFormatada: formatarDataBR(dia),
+        diaSemana: diaSemanaAbrev(dia),
         nome: item.usuario?.nome ?? '',
         cargo: item.usuario?.cargo ?? '',
         departamento: item.usuario?.departamento ?? '',
@@ -558,6 +252,8 @@ function rowsToCsv(rows) {
   const headers = [
     'periodo',
     'dia',
+    'dataFormatada',
+    'diaSemana',
     'nome',
     'cargo',
     'departamento',
@@ -597,6 +293,91 @@ function rowsToCsv(rows) {
   return lines.join('\n');
 }
 
+const ESPELHO_EXPORT_XLSX_COLUMNS = [
+  { header: 'Período', key: 'periodo', width: 10 },
+  { header: 'Data (ISO)', key: 'dia', width: 12 },
+  { header: 'Data', key: 'dataFormatada', width: 12 },
+  { header: 'Dia sem.', key: 'diaSemana', width: 8 },
+  { header: 'Nome', key: 'nome', width: 28 },
+  { header: 'Cargo', key: 'cargo', width: 16 },
+  { header: 'Departamento', key: 'departamento', width: 18 },
+  { header: 'Status do dia', key: 'status', width: 18 },
+  { header: 'Entrada', key: 'entrada', width: 10 },
+  { header: 'Origem (Entrada)', key: 'origemEntrada', width: 16 },
+  { header: 'Saída Almoço', key: 'saidaAlmoco', width: 12 },
+  { header: 'Origem (Saída Almoço)', key: 'origemSaidaAlmoco', width: 20 },
+  { header: 'Retorno Almoço', key: 'retornoAlmoco', width: 13 },
+  { header: 'Origem (Retorno)', key: 'origemRetornoAlmoco', width: 18 },
+  { header: 'Saída', key: 'saida', width: 10 },
+  { header: 'Origem (Saída)', key: 'origemSaida', width: 16 },
+  { header: 'Entrada esperada (escala)', key: 'entradaEsperada', width: 16 },
+  { header: 'Saída esperada (escala)', key: 'saidaEsperada', width: 16 },
+  { header: 'Carga prevista (h)', key: 'cargaHorariaPrevista', width: 12 },
+  { header: 'Intervalo', key: 'intervalo', width: 10 },
+  { header: 'Horas trabalhadas', key: 'horasTrabalhadas', width: 14 },
+  { header: 'Extras no dia', key: 'extras', width: 12 },
+  { header: 'Contexto (feriado/férias)', key: 'contextoDia', width: 28 },
+  { header: 'Faltando marcação', key: 'faltandoMarcacao', width: 16 },
+  { header: 'Intervalo insuficiente', key: 'intervaloInsuficiente', width: 18 },
+  { header: 'Jornada excedida', key: 'jornadaExcedida', width: 14 },
+  { header: 'Entrada atrasada', key: 'entradaAtrasada', width: 14 },
+  { header: 'Saída antecipada', key: 'saidaAntecipada', width: 14 },
+  { header: 'Almoço fora da janela', key: 'almocoForaJanela', width: 18 },
+  { header: 'Saldo dia', key: 'saldoDia', width: 12 },
+];
+
+function renderEspelhoPdf(doc, rows, periodoLabel) {
+  doc.fontSize(14).text('Espelho de Ponto', { align: 'left' });
+  doc.fontSize(10).text(`Período: ${periodoLabel}`, { align: 'left' });
+  doc.moveDown(0.5);
+
+  const headers = ['Data', 'Sem.', 'Nome', 'Status', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
+  const colW = [44, 22, 92, 58, 34, 34, 34, 34, 68, 68];
+  const startX = doc.x;
+  let y = doc.y;
+
+  function rowLine(vals, bold) {
+    let x = startX;
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7);
+    for (let i = 0; i < vals.length; i++) {
+      doc.text(String(vals[i] ?? ''), x, y, { width: colW[i], ellipsis: true });
+      x += colW[i];
+    }
+    y += 11;
+    if (y > doc.page.height - 40) {
+      doc.addPage();
+      y = doc.y;
+    }
+  }
+
+  rowLine(headers, true);
+  for (const r of rows) {
+    const flags = [];
+    if (r.faltandoMarcacao === 'SIM') flags.push('FALTA');
+    if (r.intervaloInsuficiente === 'SIM') flags.push('INTERV');
+    if (r.jornadaExcedida === 'SIM') flags.push('EXCED');
+    if (r.entradaAtrasada === 'SIM') flags.push('ATRASO');
+    if (r.saidaAntecipada === 'SIM') flags.push('SAIDA_ANT');
+    if (r.almocoForaJanela === 'SIM') flags.push('ALMOCO');
+    rowLine(
+      [
+        r.dataFormatada,
+        r.diaSemana,
+        r.nome,
+        r.status || '',
+        r.entrada,
+        r.saida,
+        r.horasTrabalhadas,
+        r.extras,
+        r.contextoDia || '',
+        flags.join(','),
+      ],
+      false
+    );
+  }
+  doc.end();
+}
+
 async function espelhoExport(req, res, next) {
   try {
     const { usuarioId, mes, ano, format } = req.query;
@@ -628,36 +409,7 @@ async function espelhoExport(req, res, next) {
     if (fmt === 'xlsx' || fmt === 'excel') {
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet('Espelho');
-      ws.columns = [
-        { header: 'Período', key: 'periodo', width: 10 },
-        { header: 'Dia', key: 'dia', width: 12 },
-        { header: 'Nome', key: 'nome', width: 28 },
-        { header: 'Cargo', key: 'cargo', width: 16 },
-        { header: 'Departamento', key: 'departamento', width: 18 },
-        { header: 'Status do dia', key: 'status', width: 18 },
-        { header: 'Entrada', key: 'entrada', width: 10 },
-        { header: 'Origem (Entrada)', key: 'origemEntrada', width: 16 },
-        { header: 'Saída Almoço', key: 'saidaAlmoco', width: 12 },
-        { header: 'Origem (Saída Almoço)', key: 'origemSaidaAlmoco', width: 20 },
-        { header: 'Retorno Almoço', key: 'retornoAlmoco', width: 13 },
-        { header: 'Origem (Retorno)', key: 'origemRetornoAlmoco', width: 18 },
-        { header: 'Saída', key: 'saida', width: 10 },
-        { header: 'Origem (Saída)', key: 'origemSaida', width: 16 },
-        { header: 'Entrada esperada (escala)', key: 'entradaEsperada', width: 16 },
-        { header: 'Saída esperada (escala)', key: 'saidaEsperada', width: 16 },
-        { header: 'Carga prevista (h)', key: 'cargaHorariaPrevista', width: 12 },
-        { header: 'Intervalo', key: 'intervalo', width: 10 },
-        { header: 'Horas trabalhadas', key: 'horasTrabalhadas', width: 14 },
-        { header: 'Extras no dia', key: 'extras', width: 12 },
-        { header: 'Contexto (feriado/férias)', key: 'contextoDia', width: 28 },
-        { header: 'Faltando marcação', key: 'faltandoMarcacao', width: 16 },
-        { header: 'Intervalo insuficiente', key: 'intervaloInsuficiente', width: 18 },
-        { header: 'Jornada excedida', key: 'jornadaExcedida', width: 14 },
-        { header: 'Entrada atrasada', key: 'entradaAtrasada', width: 14 },
-        { header: 'Saída antecipada', key: 'saidaAntecipada', width: 14 },
-        { header: 'Almoço fora da janela', key: 'almocoForaJanela', width: 18 },
-        { header: 'Saldo dia', key: 'saldoDia', width: 12 },
-      ];
+      ws.columns = ESPELHO_EXPORT_XLSX_COLUMNS;
       ws.addRows(rows);
       ws.getRow(1).font = { bold: true };
 
@@ -673,44 +425,7 @@ async function espelhoExport(req, res, next) {
 
       const doc = new PDFDocument({ size: 'A4', margin: 28 });
       doc.pipe(res);
-      doc.fontSize(14).text('Espelho de Ponto', { align: 'left' });
-      doc.fontSize(10).text(`Período: ${pad2(mesNum)}/${anoNum}`, { align: 'left' });
-      doc.moveDown(0.5);
-
-      const headers = ['Dia', 'Nome', 'Status', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
-      const colW = [50, 104, 66, 38, 38, 38, 38, 76, 76];
-      const startX = doc.x;
-      let y = doc.y;
-
-      function rowLine(vals, bold) {
-        let x = startX;
-        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7);
-        for (let i = 0; i < vals.length; i++) {
-          doc.text(String(vals[i] ?? ''), x, y, { width: colW[i], ellipsis: true });
-          x += colW[i];
-        }
-        y += 11;
-        if (y > doc.page.height - 40) {
-          doc.addPage();
-          y = doc.y;
-        }
-      }
-
-      rowLine(headers, true);
-      for (const r of rows) {
-        const flags = [];
-        if (r.faltandoMarcacao === 'SIM') flags.push('FALTA');
-        if (r.intervaloInsuficiente === 'SIM') flags.push('INTERV');
-        if (r.jornadaExcedida === 'SIM') flags.push('EXCED');
-        if (r.entradaAtrasada === 'SIM') flags.push('ATRASO');
-        if (r.saidaAntecipada === 'SIM') flags.push('SAIDA_ANT');
-        if (r.almocoForaJanela === 'SIM') flags.push('ALMOCO');
-        rowLine(
-          [r.dia, r.nome, r.status || '', r.entrada, r.saida, r.horasTrabalhadas, r.extras, r.contextoDia || '', flags.join(',')],
-          false
-        );
-      }
-      doc.end();
+      renderEspelhoPdf(doc, rows, `${pad2(mesNum)}/${anoNum}`);
       return;
     }
 
@@ -825,36 +540,7 @@ async function espelhoMeuExport(req, res, next) {
     if (fmt === 'xlsx' || fmt === 'excel') {
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet('Espelho');
-      ws.columns = [
-        { header: 'Período', key: 'periodo', width: 10 },
-        { header: 'Dia', key: 'dia', width: 12 },
-        { header: 'Nome', key: 'nome', width: 28 },
-        { header: 'Cargo', key: 'cargo', width: 16 },
-        { header: 'Departamento', key: 'departamento', width: 18 },
-        { header: 'Status do dia', key: 'status', width: 18 },
-        { header: 'Entrada', key: 'entrada', width: 10 },
-        { header: 'Origem (Entrada)', key: 'origemEntrada', width: 16 },
-        { header: 'Saída Almoço', key: 'saidaAlmoco', width: 12 },
-        { header: 'Origem (Saída Almoço)', key: 'origemSaidaAlmoco', width: 20 },
-        { header: 'Retorno Almoço', key: 'retornoAlmoco', width: 13 },
-        { header: 'Origem (Retorno)', key: 'origemRetornoAlmoco', width: 18 },
-        { header: 'Saída', key: 'saida', width: 10 },
-        { header: 'Origem (Saída)', key: 'origemSaida', width: 16 },
-        { header: 'Entrada esperada (escala)', key: 'entradaEsperada', width: 16 },
-        { header: 'Saída esperada (escala)', key: 'saidaEsperada', width: 16 },
-        { header: 'Carga prevista (h)', key: 'cargaHorariaPrevista', width: 12 },
-        { header: 'Intervalo', key: 'intervalo', width: 10 },
-        { header: 'Horas trabalhadas', key: 'horasTrabalhadas', width: 14 },
-        { header: 'Extras no dia', key: 'extras', width: 12 },
-        { header: 'Contexto (feriado/férias)', key: 'contextoDia', width: 28 },
-        { header: 'Faltando marcação', key: 'faltandoMarcacao', width: 16 },
-        { header: 'Intervalo insuficiente', key: 'intervaloInsuficiente', width: 18 },
-        { header: 'Jornada excedida', key: 'jornadaExcedida', width: 14 },
-        { header: 'Entrada atrasada', key: 'entradaAtrasada', width: 14 },
-        { header: 'Saída antecipada', key: 'saidaAntecipada', width: 14 },
-        { header: 'Almoço fora da janela', key: 'almocoForaJanela', width: 18 },
-        { header: 'Saldo dia', key: 'saldoDia', width: 12 },
-      ];
+      ws.columns = ESPELHO_EXPORT_XLSX_COLUMNS;
       ws.addRows(rows);
       ws.getRow(1).font = { bold: true };
 
@@ -870,44 +556,7 @@ async function espelhoMeuExport(req, res, next) {
 
       const doc = new PDFDocument({ size: 'A4', margin: 28 });
       doc.pipe(res);
-      doc.fontSize(14).text('Espelho de Ponto', { align: 'left' });
-      doc.fontSize(10).text(`Período: ${pad2(mesNum)}/${anoNum}`, { align: 'left' });
-      doc.moveDown(0.5);
-
-      const headers = ['Dia', 'Nome', 'Status', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
-      const colW = [50, 104, 66, 38, 38, 38, 38, 76, 76];
-      const startX = doc.x;
-      let y = doc.y;
-
-      function rowLine(vals, bold) {
-        let x = startX;
-        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7);
-        for (let i = 0; i < vals.length; i++) {
-          doc.text(String(vals[i] ?? ''), x, y, { width: colW[i], ellipsis: true });
-          x += colW[i];
-        }
-        y += 11;
-        if (y > doc.page.height - 40) {
-          doc.addPage();
-          y = doc.y;
-        }
-      }
-
-      rowLine(headers, true);
-      for (const r of rows) {
-        const flags = [];
-        if (r.faltandoMarcacao === 'SIM') flags.push('FALTA');
-        if (r.intervaloInsuficiente === 'SIM') flags.push('INTERV');
-        if (r.jornadaExcedida === 'SIM') flags.push('EXCED');
-        if (r.entradaAtrasada === 'SIM') flags.push('ATRASO');
-        if (r.saidaAntecipada === 'SIM') flags.push('SAIDA_ANT');
-        if (r.almocoForaJanela === 'SIM') flags.push('ALMOCO');
-        rowLine(
-          [r.dia, r.nome, r.status || '', r.entrada, r.saida, r.horasTrabalhadas, r.extras, r.contextoDia || '', flags.join(',')],
-          false
-        );
-      }
-      doc.end();
+      renderEspelhoPdf(doc, rows, `${pad2(mesNum)}/${anoNum}`);
       return;
     }
 
@@ -1196,17 +845,20 @@ async function bancoHorasResumo(req, res, next) {
       totalEsperadoMin: u.totalEsperadoMin,
       saldoMesMin: u.saldoMesMin,
       horaExtraMesMin: u.horaExtraMesMin,
+      heDiaUtilMin: u.heDiaUtilMin,
+      heSemanalMin: u.heSemanalMin,
       deficitMesMin: u.deficitMesMin,
       totalHoras: u.totalHoras,
       horaExtraMes: u.horaExtraMes,
       saldoMes: u.saldoMes,
       diasResumo: u.resumo,
+      clt: u.clt,
     }));
 
     res.json({
       periodo: { mes: mesNum, ano: anoNum },
       obs:
-        'Saldo = trabalhado − esperado. O esperado conta apenas dias úteis devidos; folgas (semanais ou avulsas), feriados, férias, faltas justificadas e dias futuros têm esperado 0.',
+        'Saldo = trabalhado − esperado. HE inclui excedente diário (acima de 8h CLT) e semanal (acima de 44h). O esperado conta apenas dias úteis devidos; folgas, feriados, férias e justificadas têm esperado 0.',
       resumo: lista,
     });
   } catch (err) {

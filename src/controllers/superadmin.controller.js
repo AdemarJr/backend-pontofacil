@@ -6,6 +6,23 @@ const { frontendBase } = require('../services/passwordReset.service');
 const { sendPasswordResetEmail, sendFirstAccessInviteEmail } = require('../services/supabaseAuth.service');
 
 const prisma = require('../infra/prisma');
+const { resolverDadosContrato, diasAteExpiracao } = require('../shared/contractPeriod');
+const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
+
+function responderErroSchemaPrisma(err, res) {
+  const msg = String(err?.message || '');
+  const schemaDesatualizado =
+    err?.code === 'P2021' ||
+    err?.code === 'P2022' ||
+    /does not exist/i.test(msg);
+  if (!schemaDesatualizado) return false;
+  res.status(500).json({
+    error:
+      'Banco de dados desatualizado para o módulo de folha. Execute folha-pagamento-atualizacao.sql no Supabase (PARTE 1 e PARTE 2) e reinicie o backend.',
+    code: 'DB_SCHEMA_OUTDATED',
+  });
+  return true;
+}
 
 async function listarTenants(req, res, next) {
   try {
@@ -20,8 +37,19 @@ async function listarTenants(req, res, next) {
       },
       orderBy: { createdAt: 'desc' },
     });
-    res.json(tenants);
-  } catch (err) { next(err); }
+
+    const tenantsComFeatures = await Promise.all(
+      tenants.map(async (t) => ({
+        ...t,
+        features: await lerFeaturesDoTenant(t.id),
+      }))
+    );
+
+    res.json(tenantsComFeatures);
+  } catch (err) {
+    if (responderErroSchemaPrisma(err, res)) return;
+    next(err);
+  }
 }
 
 async function criarTenant(req, res, next) {
@@ -67,6 +95,9 @@ async function criarTenant(req, res, next) {
           telefone: telefone || null,
           plano: plano || 'BASICO',
         },
+      });
+      await tx.tenantFeature.create({
+        data: { tenantId: t.id, payrollModuleEnabled: false },
       });
       const u = await tx.usuario.create({
         data: {
@@ -117,7 +148,10 @@ async function criarTenant(req, res, next) {
 async function atualizarTenant(req, res, next) {
   try {
     const { id } = req.params;
-    const { razaoSocial, nomeFantasia, cnpj, email, telefone, plano } = req.body;
+    const {
+      razaoSocial, nomeFantasia, cnpj, email, telefone, plano,
+      payrollModuleEnabled, contractStartDate, periodoContrato,
+    } = req.body;
 
     const existente = await prisma.tenant.findUnique({ where: { id } });
     if (!existente) return res.status(404).json({ error: 'Empresa não encontrada' });
@@ -127,22 +161,154 @@ async function atualizarTenant(req, res, next) {
       if (dup) return res.status(409).json({ error: 'CNPJ já cadastrado para outra empresa' });
     }
 
-    const tenant = await prisma.tenant.update({
-      where: { id },
-      data: {
-        ...(razaoSocial !== undefined && { razaoSocial }),
-        ...(nomeFantasia !== undefined && { nomeFantasia }),
-        ...(cnpj !== undefined && { cnpj }),
-        ...(email !== undefined && { email }),
-        ...(telefone !== undefined && { telefone: telefone || null }),
-        ...(plano !== undefined && { plano }),
-      },
+    let dadosContrato;
+    const atualizaContrato =
+      periodoContrato !== undefined || contractStartDate !== undefined;
+    if (atualizaContrato) {
+      try {
+        dadosContrato = resolverDadosContrato({
+          contractStartDate: periodoContrato && periodoContrato !== 'SEM_LIMITE'
+            ? contractStartDate
+            : null,
+          periodoContrato: !periodoContrato || periodoContrato === 'SEM_LIMITE'
+            ? null
+            : periodoContrato,
+        });
+      } catch (e) {
+        return res.status(400).json({ error: e.message });
+      }
+    }
+
+    const tenant = await prisma.$transaction(async (tx) => {
+      await tx.tenant.update({
+        where: { id },
+        data: {
+          ...(razaoSocial !== undefined && { razaoSocial }),
+          ...(nomeFantasia !== undefined && { nomeFantasia }),
+          ...(cnpj !== undefined && { cnpj }),
+          ...(email !== undefined && { email }),
+          ...(telefone !== undefined && { telefone: telefone || null }),
+          ...(plano !== undefined && { plano }),
+          ...(dadosContrato && dadosContrato),
+        },
+      });
+
+      if (payrollModuleEnabled !== undefined) {
+        const agora = new Date();
+        await tx.tenantFeature.upsert({
+          where: { tenantId: id },
+          create: {
+            tenantId: id,
+            payrollModuleEnabled: Boolean(payrollModuleEnabled),
+            updatedAt: agora,
+          },
+          update: {
+            payrollModuleEnabled: Boolean(payrollModuleEnabled),
+            updatedAt: agora,
+          },
+        });
+      }
+
+      return tx.tenant.findUnique({ where: { id } });
     });
+
+    tenant.features = await lerFeaturesDoTenant(id);
+
+    if (tenant.status === 'SUSPENSO' && tenant.periodoContrato && tenant.contractEndDate) {
+      const dias = diasAteExpiracao(tenant.contractEndDate);
+      if (dias != null && dias >= 0) {
+        await prisma.tenant.update({ where: { id }, data: { status: 'ATIVO' } });
+        tenant.status = 'ATIVO';
+      }
+    }
+
     res.json(tenant);
   } catch (err) {
+    if (responderErroSchemaPrisma(err, res)) return;
     if (err.code === 'P2002') {
       return res.status(409).json({ error: 'CNPJ ou e-mail já cadastrado' });
     }
+    next(err);
+  }
+}
+
+async function atualizarFeatures(req, res, next) {
+  try {
+    const { id: tenantId } = req.params;
+    const { payrollModuleEnabled } = req.body;
+
+    if (payrollModuleEnabled === undefined) {
+      return res.status(400).json({ error: 'Informe payrollModuleEnabled (true ou false)' });
+    }
+
+    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
+    if (!tenant) return res.status(404).json({ error: 'Empresa não encontrada' });
+
+    const habilitado = payrollModuleEnabled === true || payrollModuleEnabled === 'true';
+    const agora = new Date();
+
+    await prisma.$executeRaw`
+      INSERT INTO "tenant_features" ("tenantId", "payrollModuleEnabled", "updatedAt")
+      VALUES (${tenantId}, ${habilitado}, ${agora})
+      ON CONFLICT ("tenantId")
+      DO UPDATE SET
+        "payrollModuleEnabled" = ${habilitado},
+        "updatedAt" = ${agora}
+    `;
+
+    const features = await prisma.tenantFeature.findUnique({
+      where: { tenantId },
+      select: { tenantId: true, payrollModuleEnabled: true, updatedAt: true },
+    });
+
+    if (!features || features.payrollModuleEnabled !== habilitado) {
+      return res.status(500).json({
+        error: 'Falha ao gravar módulo de folha. Tente novamente ou contate o suporte.',
+        code: 'FEATURE_SAVE_FAILED',
+        esperado: habilitado,
+        gravado: features?.payrollModuleEnabled ?? null,
+      });
+    }
+
+    res.json(features);
+  } catch (err) {
+    if (responderErroSchemaPrisma(err, res)) return;
+    next(err);
+  }
+}
+
+async function atualizarContrato(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { contractStartDate, periodoContrato } = req.body;
+
+    let dadosContrato;
+    try {
+      dadosContrato = resolverDadosContrato({ contractStartDate, periodoContrato });
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+
+    const existente = await prisma.tenant.findUnique({ where: { id } });
+    if (!existente) return res.status(404).json({ error: 'Empresa não encontrada' });
+
+    const tenant = await prisma.tenant.update({
+      where: { id },
+      data: dadosContrato,
+    });
+
+    // Se reativou contrato e empresa estava suspensa só por vencimento, reativa
+    if (tenant.status === 'SUSPENSO' && tenant.periodoContrato && tenant.contractEndDate) {
+      const dias = diasAteExpiracao(tenant.contractEndDate);
+      if (dias != null && dias >= 0) {
+        await prisma.tenant.update({ where: { id }, data: { status: 'ATIVO' } });
+        tenant.status = 'ATIVO';
+      }
+    }
+
+    res.json(tenant);
+  } catch (err) {
+    if (responderErroSchemaPrisma(err, res)) return;
     next(err);
   }
 }
@@ -347,6 +513,8 @@ module.exports = {
   resetSenhaAdminTenant,
   reenviarConviteAdminTenant,
   atualizarTenant,
+  atualizarFeatures,
+  atualizarContrato,
   atualizarStatus,
   stats,
   limparRegistrosTenant,
