@@ -107,6 +107,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       select: {
         toleranciaMinutos: true,
         intervaloMinimoAlmocoMinutos: true,
+        modoMarcacao: true,
       },
     }),
     prisma.usuario.findMany({
@@ -119,7 +120,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       select: {
         id: true, nome: true, cargo: true, departamento: true,
         dataAdmissao: true, dataDemissao: true,
-        tipoContrato: true, salarioBase: true, cpf: true,
+        tipoContrato: true, salarioBase: true, cpf: true, pis: true,
         dependentesIrrf: true,
       },
       orderBy: { nome: 'asc' },
@@ -127,6 +128,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
   ]);
   const tol = tenant?.toleranciaMinutos ?? 5;
   const clt = cltOptsFromTenant(tenant);
+  const modoMarcacao = tenant?.modoMarcacao || 'QUATRO_BATIDAS';
 
   if (colaboradores.length === 0) return {};
 
@@ -275,6 +277,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         toleranciaMinutos: tol,
         dataRef: dia,
         clt: clt.ativo ? clt : null,
+        modoMarcacao,
       });
       const minutos = calc.minutosTrabalhados;
 

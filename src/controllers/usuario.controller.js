@@ -5,6 +5,7 @@ const { encryptPin, decryptPin } = require('../utils/pinCrypto');
 const { sendConviteUsuario } = require('../services/passwordReset.service');
 
 const prisma = require('../infra/prisma');
+const { validarCpfOuPis } = require('../shared/documentoIdentificacao');
 
 async function listar(req, res, next) {
   try {
@@ -85,19 +86,38 @@ async function criar(req, res, next) {
       if (!loc) return res.status(400).json({ error: 'Local de registro inválido' });
     }
 
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: req.tenantId },
+      select: { exigirCpfPis: true },
+    });
+    const roleFinal = role === 'ADMIN' ? 'ADMIN' : 'COLABORADOR';
+    let cpfNorm = null;
+    let pisNorm = null;
+    if (roleFinal === 'COLABORADOR' && tenant?.exigirCpfPis !== false) {
+      const docVal = validarCpfOuPis({ cpf, pis, exigir: true });
+      if (!docVal.ok) return res.status(400).json({ error: docVal.error });
+      cpfNorm = docVal.cpf;
+      pisNorm = docVal.pis;
+    } else {
+      const docVal = validarCpfOuPis({ cpf, pis, exigir: false });
+      if (!docVal.ok) return res.status(400).json({ error: docVal.error });
+      cpfNorm = docVal.cpf;
+      pisNorm = docVal.pis;
+    }
+
     const usuario = await prisma.usuario.create({
       data: {
         tenantId: req.tenantId,
         nome, email: emailNorm, pinHash, pinEncrypted,
         cargo: cargo || null,
         departamento: departamento || null,
-        role: role === 'ADMIN' ? 'ADMIN' : 'COLABORADOR',
+        role: roleFinal,
         ...(localRegistroId && { localRegistroId }),
         isentoGeofence: Boolean(isentoGeofence),
         dataAdmissao: dataAdmissao ? new Date(String(dataAdmissao) + 'T12:00:00') : null,
         dataDemissao: dataDemissao ? new Date(String(dataDemissao) + 'T12:00:00') : null,
-        cpf: cpf || null,
-        pis: pis || null,
+        cpf: cpfNorm,
+        pis: pisNorm,
         matricula: matricula || null,
         tipoContrato: tipoContrato || 'CLT',
         salarioBase: salarioBase != null && salarioBase !== '' ? Number(salarioBase) : null,
@@ -211,8 +231,26 @@ async function atualizar(req, res, next) {
       dados.isentoGeofence = Boolean(isentoGeofence);
     }
 
-    if (cpf !== undefined) dados.cpf = cpf || null;
-    if (pis !== undefined) dados.pis = pis || null;
+    if (cpf !== undefined || pis !== undefined) {
+      const alvo = await prisma.usuario.findFirst({
+        where: { id: req.params.id, tenantId: req.tenantId },
+        select: { cpf: true, pis: true, role: true },
+      });
+      const tenant = await prisma.tenant.findUnique({
+        where: { id: req.tenantId },
+        select: { exigirCpfPis: true },
+      });
+      const cpfEff = cpf !== undefined ? cpf : alvo?.cpf;
+      const pisEff = pis !== undefined ? pis : alvo?.pis;
+      const docVal = validarCpfOuPis({
+        cpf: cpfEff,
+        pis: pisEff,
+        exigir: alvo?.role === 'COLABORADOR' && tenant?.exigirCpfPis !== false,
+      });
+      if (!docVal.ok) return res.status(400).json({ error: docVal.error });
+      if (cpf !== undefined) dados.cpf = docVal.cpf;
+      if (pis !== undefined) dados.pis = docVal.pis;
+    }
     if (matricula !== undefined) dados.matricula = matricula || null;
     if (tipoContrato !== undefined) dados.tipoContrato = tipoContrato;
     if (salarioBase !== undefined) {

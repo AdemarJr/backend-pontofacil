@@ -1,6 +1,10 @@
 # Credenciais e ambiente
 .env
 .env.*
+.env-production
+.env-production.*
+hom.env
+*.env.local
 !.env.example
 *.pem
 *.key
