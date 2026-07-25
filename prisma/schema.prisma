@@ -56,9 +56,14 @@ model Tenant {
   /// Exige CPF ou PIS no colaborador para registrar ponto
   exigirCpfPis   Boolean      @default(true)
 
+  /// Plano comercial cadastrado pelo Super Admin (valor + limite de colaboradores)
+  planoComercialId String?
+  planoComercial   PlanoComercial? @relation(fields: [planoComercialId], references: [id], onDelete: SetNull)
+
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
+  pagamentosPlano PagamentoPlano[]
   auditoriaEventos AuditoriaEvento[]
   features       TenantFeature?
   folhaConfig    FolhaConfig?
@@ -114,6 +119,56 @@ enum PeriodoContratoTenant {
   MENSAL
   SEMESTRAL
   ANUAL
+}
+
+// ---- PLANOS COMERCIAIS (catálogo SaaS) ----
+model PlanoComercial {
+  id               String   @id @default(uuid())
+  nome             String
+  descricao        String?
+  /// Valor mensal em centavos (ex.: R$ 99,00 = 9900)
+  valorCentavos    Int
+  /// Limite de colaboradores ativos; null = ilimitado
+  maxColaboradores Int?
+  ativo            Boolean  @default(true)
+  ordem            Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  tenants    Tenant[]
+  pagamentos PagamentoPlano[]
+
+  @@map("planos_comerciais")
+}
+
+enum StatusPagamentoPlano {
+  PENDENTE
+  PAGO
+  CANCELADO
+  EXPIRADO
+}
+
+model PagamentoPlano {
+  id               String               @id @default(uuid())
+  tenantId         String
+  tenant           Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  planoComercialId String
+  planoComercial   PlanoComercial       @relation(fields: [planoComercialId], references: [id], onDelete: Restrict)
+  orderNsu         String               @unique
+  invoiceSlug      String?
+  transactionNsu   String?
+  status           StatusPagamentoPlano @default(PENDENTE)
+  valorCentavos    Int
+  checkoutUrl      String?
+  receiptUrl       String?
+  captureMethod    String?
+  paidAt           DateTime?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  @@index([tenantId, createdAt])
+  @@index([status])
+  @@map("pagamentos_plano")
 }
 
 enum ModoMarcacao {

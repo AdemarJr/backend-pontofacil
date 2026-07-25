@@ -26,6 +26,7 @@ const feriadoRoutes = require('./routes/feriado.routes');
 const feriasRoutes = require('./routes/ferias.routes');
 const colaboradorRoutes = require('./routes/colaborador.routes');
 const folhaRoutes = require('./modules/folha/folha.routes');
+const pagamentoRoutes = require('./routes/pagamento.routes');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -132,6 +133,8 @@ app.use('/api/feriados', feriadoRoutes);
 app.use('/api/ferias', feriasRoutes);
 app.use('/api/colaborador', colaboradorRoutes);
 app.use('/api/folha', folhaRoutes);
+app.use('/api/webhooks', pagamentoRoutes);
+app.use('/api/pagamentos', pagamentoRoutes);
 
 // Endpoint para diagnosticar IP de saída (egress IP)
 app.get('/api/check-ip', (req, res) => {
