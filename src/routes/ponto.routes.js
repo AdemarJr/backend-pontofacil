@@ -8,9 +8,11 @@ const {
   pendenciasColaborador,
   solicitarAjusteColaborador,
   excluirRegistroAdmin,
+  comprovantePdf,
 } = require('../controllers/ponto.controller');
 
 router.post('/registrar', autenticar, registrar);
+router.get('/registros/:registroId/comprovante.pdf', autenticar, comprovantePdf);
 router.get('/', autenticar, exigirAdmin, listar);
 router.get('/ultimo/:usuarioId', autenticar, ultimoPonto);
 router.get('/pendencias', autenticar, exigirColaborador, pendenciasColaborador);

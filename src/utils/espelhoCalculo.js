@@ -73,7 +73,7 @@ function minutosDoDia(dataHora) {
  * @param {{ escala?: object|null, toleranciaMinutos?: number, dataRef?: string, clt?: object|null }} opts
  */
 function calcularDia(pontos, opts = {}) {
-  const { escala, toleranciaMinutos = 5, dataRef, clt = null } = opts;
+  const { escala, toleranciaMinutos = 5, dataRef, clt = null, modoMarcacao = 'QUATRO_BATIDAS' } = opts;
 
   const sorted = [...pontos].sort((a, b) => new Date(a.dataHora) - new Date(b.dataHora));
   const getTipo = (t) => String(t || '').toUpperCase();
@@ -130,9 +130,11 @@ function calcularDia(pontos, opts = {}) {
   }
 
   const faltandoMarcacao =
-    !entrada ||
-    !saida ||
-    Boolean(saidaAlmoco) !== Boolean(retornoAlmoco);
+    modoMarcacao === 'DUAS_BATIDAS'
+      ? !entrada || !saida
+      : !entrada ||
+        !saida ||
+        Boolean(saidaAlmoco) !== Boolean(retornoAlmoco);
 
   const intervaloInsuficiente = intervaloMin != null && intervaloMin < intervaloMinimo;
 

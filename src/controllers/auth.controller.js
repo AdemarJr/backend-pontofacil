@@ -2,8 +2,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
-const { requestForgotByEmail, resetPasswordWithToken, frontendBase } = require('../services/passwordReset.service');
-const { sendPasswordResetEmail, updatePasswordWithToken, sendNewManagerInviteEmail } = require('../services/supabaseAuth.service');
+const { requestForgotByEmail, resetPasswordWithToken, sendConviteUsuario } = require('../services/passwordReset.service');
 
 const prisma = require('../infra/prisma');
 const { isContractExpired, contractExpiredPayload } = require('../shared/contractCheck');
@@ -195,10 +194,12 @@ async function refreshToken(req, res, next) {
 async function esqueciSenha(req, res, next) {
   try {
     const { email, tenantId } = req.body;
-    if (!email) return res.status(400).json({ error: 'E-mail é obrigatório' });
+    if (!email || typeof email !== 'string' || !email.trim()) {
+      return res.status(400).json({ error: 'E-mail é obrigatório.' });
+    }
 
     try {
-      await requestForgotByEmail(email, tenantId);
+      await requestForgotByEmail(email.trim(), tenantId);
     } catch (e) {
       if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
       throw e;
@@ -230,115 +231,42 @@ async function redefinirSenha(req, res, next) {
 }
 
 /**
- * POST /api/auth/forgot-password
- * Triggers Supabase Auth to send a password-reset email.
- * Does not reveal whether the address exists in Supabase.
- */
-async function esqueciSenhaSupabase(req, res, next) {
-  try {
-    const { email } = req.body;
-    if (!email || typeof email !== 'string' || !email.trim()) {
-      return res.status(400).json({ error: 'E-mail é obrigatório.' });
-    }
-
-    const redirectTo = `${frontendBase()}/redefinir-senha`;
-
-    try {
-      await sendPasswordResetEmail(email.trim().toLowerCase(), redirectTo);
-    } catch (e) {
-      if (e.code === 'SUPABASE_NOT_CONFIGURED') {
-        console.error('[SUPABASE_AUTH] Variáveis de ambiente ausentes:', e.message);
-        return res.status(500).json({ error: e.message, code: e.code });
-      }
-      // For other Supabase errors we still return a generic success to avoid
-      // leaking whether an address is registered.
-      console.error('[SUPABASE_AUTH] Falha ao enviar e-mail de reset:', e.message);
-    }
-
-    return res.json({
-      mensagem:
-        'Verifique a caixa de entrada e o spam.',
-    });
-  } catch (err) {
-    return next(err);
-  }
-}
-
-/**
- * POST /api/auth/reset-password
- * Receives the Supabase access token (from the reset link) and the new password,
- * then updates the user's password via Supabase Auth.
- */
-async function redefinirSenhaSupabase(req, res, next) {
-  try {
-    const { token, senha } = req.body;
-
-    try {
-      const r = await updatePasswordWithToken(token, senha);
-
-      // Mantém o banco local (Prisma) sincronizado com a senha do Supabase,
-      // pois o login do sistema ainda valida `senhaHash`/`pinHash`.
-      if (r?.email) {
-        const senhaHash = await bcrypt.hash(String(senha), 12);
-        await Promise.all([
-          prisma.usuario.updateMany({
-            where: { email: r.email, ativo: true },
-            data: { senhaHash },
-          }),
-          prisma.superAdmin.updateMany({
-            where: { email: r.email, ativo: true },
-            data: { senhaHash },
-          }),
-        ]);
-      }
-    } catch (e) {
-      if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
-      throw e;
-    }
-
-    return res.json({
-      sucesso: true,
-      mensagem: 'Senha atualizada com sucesso. Você já pode entrar com a nova senha.',
-    });
-  } catch (err) {
-    return next(err);
-  }
-}
-
-/**
  * POST /api/auth/send-manager-invite
- * Sends a welcome/invitation email to a newly created manager or account owner.
- * Requires an authenticated admin or super-admin user (enforced via middleware).
- *
- * Body: { email: string, nome: string, nomeEmpresa: string }
+ * Envia convite de primeiro acesso por e-mail (SMTP).
  */
 async function enviarConviteGerente(req, res, next) {
   try {
-    const { email, nome, nomeEmpresa } = req.body;
+    const { email } = req.body;
 
     if (!email || typeof email !== 'string' || !email.trim()) {
       return res.status(400).json({ error: 'E-mail é obrigatório.' });
     }
-    if (!nome || typeof nome !== 'string' || !nome.trim()) {
-      return res.status(400).json({ error: 'Nome do gerente é obrigatório.' });
+
+    const usuario = await prisma.usuario.findFirst({
+      where: { email: email.trim().toLowerCase(), ativo: true },
+      select: { id: true, email: true },
+    });
+    if (!usuario) {
+      return res.status(404).json({ error: 'Usuário não encontrado com este e-mail.' });
     }
 
-    try {
-      await sendNewManagerInviteEmail(
-        email.trim().toLowerCase(),
-        nome.trim(),
-        nomeEmpresa ? String(nomeEmpresa).trim() : ''
+    const r = await sendConviteUsuario(usuario.id);
+    if (!r.ok) {
+      const err = new Error(
+        r.skipped
+          ? 'Servidor sem SMTP configurado para envio de e-mails.'
+          : 'Falha ao enviar convite por e-mail.'
       );
-    } catch (e) {
-      if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
-      throw e;
+      err.status = r.skipped ? 503 : 502;
+      throw err;
     }
 
     return res.json({
       sucesso: true,
-      mensagem: `Convite enviado com sucesso para ${email.trim().toLowerCase()}.`,
+      mensagem: `Convite enviado com sucesso para ${usuario.email}.`,
     });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     return next(err);
   }
 }
@@ -349,7 +277,5 @@ module.exports = {
   refreshToken,
   esqueciSenha,
   redefinirSenha,
-  esqueciSenhaSupabase,
-  redefinirSenhaSupabase,
   enviarConviteGerente,
 };

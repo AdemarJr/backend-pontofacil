@@ -1,7 +1,6 @@
 // Instância única (singleton) do PrismaClient para todo o backend.
 // Evita abrir vários pools de conexão (um por controller), que esgotava
-// o limite do pooler do Supabase e causava timeouts ("Timed out fetching
-// a new connection from the connection pool").
+// o limite do PostgreSQL e causava timeouts na conexão.
 const { PrismaClient } = require('@prisma/client');
 
 const globalForPrisma = globalThis;

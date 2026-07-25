@@ -4,6 +4,7 @@ const { PrismaClient } = require('@prisma/client');
 const { autenticar, exigirAdmin } = require('../middlewares/auth.middleware');
 const prisma = require('../infra/prisma');
 const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
+const { registrarAuditoria, ipHashFromReq } = require('../shared/auditoria.service');
 
 function isOutdatedSchemaError(err) {
   // Prisma: P2022 = column does not exist
@@ -40,6 +41,9 @@ router.get('/meu', autenticar, async (req, res, next) => {
           periodoContrato: true,
           contractStartDate: true,
           contractEndDate: true,
+          modoMarcacao: true,
+          modoInviolavel: true,
+          exigirCpfPis: true,
         },
       }),
       lerFeaturesDoTenant(req.tenantId),
@@ -73,7 +77,24 @@ router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
       toleranciaMinutos,
       trabalhoMinimoAntesSaidaMinutos,
       intervaloMinimoAlmocoMinutos,
+      modoMarcacao,
+      modoInviolavel,
+      exigirCpfPis,
     } = req.body;
+
+    const antes = await prisma.tenant.findUnique({
+      where: { id: req.tenantId },
+      select: {
+        modoMarcacao: true,
+        modoInviolavel: true,
+        exigirCpfPis: true,
+        permitirTotem: true,
+        permitirMeuPonto: true,
+        geofenceAtivo: true,
+        fotoObrigatoria: true,
+      },
+    });
+
     await prisma.tenant.update({
       where: { id: req.tenantId },
       data: {
@@ -91,7 +112,30 @@ router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
         ...(intervaloMinimoAlmocoMinutos !== undefined && {
           intervaloMinimoAlmocoMinutos: parseInt(intervaloMinimoAlmocoMinutos),
         }),
-      }
+        ...(modoMarcacao !== undefined && { modoMarcacao: String(modoMarcacao) }),
+        ...(modoInviolavel !== undefined && { modoInviolavel: Boolean(modoInviolavel) }),
+        ...(exigirCpfPis !== undefined && { exigirCpfPis: Boolean(exigirCpfPis) }),
+      },
+    });
+
+    await registrarAuditoria({
+      tenantId: req.tenantId,
+      entidade: 'Tenant',
+      entidadeId: req.tenantId,
+      acao: 'TENANT_CONFIG',
+      payloadAntes: antes,
+      payloadDepois: {
+        modoMarcacao,
+        modoInviolavel,
+        exigirCpfPis,
+        permitirTotem,
+        permitirMeuPonto,
+        geofenceAtivo,
+        fotoObrigatoria,
+      },
+      actorId: req.usuario.id,
+      actorRole: req.usuario.role,
+      ipHash: ipHashFromReq(req),
     });
     res.json({ sucesso: true });
   } catch (err) {

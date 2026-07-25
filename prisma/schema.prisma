@@ -47,9 +47,19 @@ model Tenant {
   contractStartDate DateTime?
   contractEndDate   DateTime? // calculado automaticamente a partir do período
 
+  /// REP-P: sequência de marcação (2 ou 4 batidas por dia)
+  modoMarcacao   ModoMarcacao @default(QUATRO_BATIDAS)
+  /// Próximo NSR a atribuir (contador atômico por estabelecimento/CNPJ)
+  proximoNsr     Int          @default(1)
+  /// Quando true, registros não podem ser excluídos (soft-delete bloqueado)
+  modoInviolavel Boolean      @default(false)
+  /// Exige CPF ou PIS no colaborador para registrar ponto
+  exigirCpfPis   Boolean      @default(true)
+
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
+  auditoriaEventos AuditoriaEvento[]
   features       TenantFeature?
   folhaConfig    FolhaConfig?
   folhaRuns      FolhaRun[]
@@ -106,6 +116,11 @@ enum PeriodoContratoTenant {
   ANUAL
 }
 
+enum ModoMarcacao {
+  QUATRO_BATIDAS
+  DUAS_BATIDAS
+}
+
 // ---- USUÁRIOS ----
 model Usuario {
   id          String   @id @default(uuid())
@@ -155,6 +170,10 @@ model Usuario {
   contaAgencia         String?
   contaNumero          String?
   contaTipo            TipoContaBancaria?
+
+  /// LGPD / Portaria 671: consentimento para geolocalização e foto
+  consentimentoDadosEm      DateTime?
+  consentimentoDadosVersao  String?
 
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -301,6 +320,10 @@ model RegistroPonto {
 
   tipo        TipoPonto
   dataHora    DateTime @default(now())
+  /// Horário UTC no servidor no momento do registro (REP-P)
+  dataHoraUtc DateTime?
+  /// Número Sequencial de Registro por tenant (Portaria 671)
+  nsr         Int?
 
   // Localização
   latitude    Float?
@@ -335,8 +358,30 @@ model RegistroPonto {
 
   @@index([tenantId, usuarioId])
   @@index([tenantId, dataHora])
+  @@unique([tenantId, nsr], map: "registros_ponto_tenant_nsr_unique")
   @@unique([tenantId, usuarioId, clientRequestId], map: "registros_ponto_client_request_unique")
   @@map("registros_ponto")
+}
+
+// ---- AUDITORIA APPEND-ONLY (REP-P / fiscalização interna) ----
+model AuditoriaEvento {
+  id            String   @id @default(uuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  entidade      String
+  entidadeId    String
+  acao          String
+  payloadAntes  Json?
+  payloadDepois Json?
+  actorId       String?
+  actorRole     String?
+  ipHash        String?
+  createdAt     DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, entidade, entidadeId])
+  @@index([tenantId, acao])
+  @@map("auditoria_eventos")
 }
 
 enum TipoPonto {

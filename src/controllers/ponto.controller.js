@@ -1,20 +1,27 @@
 // src/controllers/ponto.controller.js
-const { PrismaClient } = require('@prisma/client');
 const { uploadFoto, gerarUrlAssinada } = require('../services/s3.service');
 const { validarGeofence, validarEmAlgumLocal } = require('../utils/geofence');
 const { calcularDia, pad2 } = require('../utils/espelhoCalculo');
 const crypto = require('crypto');
 
 const prisma = require('../infra/prisma');
+const { criarRegistroPonto } = require('../modules/ponto/registroPonto.service');
+const {
+  determinarProximoTipo,
+  tiposPermitidosRegistro,
+  ultimoTipoFechaCiclo,
+} = require('../modules/ponto/sequenciaMarcacao');
+const { usuarioTemDocumento } = require('../shared/documentoIdentificacao');
+const { registrarAuditoria, ipHashFromReq } = require('../shared/auditoria.service');
+const { CONSENTIMENTO_VERSAO_ATUAL } = require('../shared/consentimento');
+const { gerarComprovantePdfStream, urlComprovante } = require('../modules/ponto/comprovanteRegistro.service');
 
 const LIMITE_PENDENCIA_MODAL_HORAS = 12;
 const LIMITE_TURNO_MAX_HORAS = 16;
 const COOLDOWN_BATIDA_SEGUNDOS = 15;
 
-// Avisos de "registro cedo demais" (não impedem se o usuário confirmar).
-// Mantemos no backend para ficar consistente entre dispositivos.
-const DEFAULT_MIN_TRABALHO_ANTES_SAIDA_MIN = 30; // ENTRADA->SAIDA_ALMOCO/SAIDA ou RETORNO->SAIDA
-const DEFAULT_MIN_INTERVALO_ALMOCO_MIN = 30; // SAIDA_ALMOCO->RETORNO_ALMOCO
+const DEFAULT_MIN_TRABALHO_ANTES_SAIDA_MIN = 30;
+const DEFAULT_MIN_INTERVALO_ALMOCO_MIN = 30;
 
 function diffHoras(a, b) {
   const ms = Math.abs(new Date(a).getTime() - new Date(b).getTime());
@@ -54,11 +61,29 @@ function isSameLocalDay(a, b) {
   );
 }
 
+function registroResponse(registro, proximoTipo) {
+  return {
+    id: registro.id,
+    nsr: registro.nsr,
+    tipo: registro.tipo,
+    dataHora: registro.dataHora,
+    usuario: registro.usuario?.nome,
+    comprovanteUrl: urlComprovante(registro.id),
+    proximoTipo,
+  };
+}
+
 async function pendenciasColaborador(req, res, next) {
   try {
     const tenantId = req.tenantId;
     const usuarioId = req.usuario.id;
     const dias = Math.min(60, Math.max(1, parseInt(req.query.dias || '14', 10)));
+
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { modoMarcacao: true },
+    });
+    const modoMarcacao = tenant?.modoMarcacao || 'QUATRO_BATIDAS';
 
     const agora = new Date();
     const inicioJanela = new Date(agora);
@@ -81,17 +106,19 @@ async function pendenciasColaborador(req, res, next) {
 
     const pendencias = [];
     for (const [dia, pontos] of porDia.entries()) {
-      const calc = calcularDia(pontos, { dataRef: dia });
+      const calc = calcularDia(pontos, { dataRef: dia, modoMarcacao });
       if (!calc.flags?.faltandoMarcacao) continue;
 
       const missing = [];
       if (!calc.entrada) missing.push('ENTRADA');
       if (!calc.saida) missing.push('SAIDA');
-      const temSaidaAlmoco = Boolean(calc.saidaAlmoco);
-      const temRetorno = Boolean(calc.retornoAlmoco);
-      if (temSaidaAlmoco !== temRetorno) {
-        if (!temSaidaAlmoco) missing.push('SAIDA_ALMOCO');
-        if (!temRetorno) missing.push('RETORNO_ALMOCO');
+      if (modoMarcacao !== 'DUAS_BATIDAS') {
+        const temSaidaAlmoco = Boolean(calc.saidaAlmoco);
+        const temRetorno = Boolean(calc.retornoAlmoco);
+        if (temSaidaAlmoco !== temRetorno) {
+          if (!temSaidaAlmoco) missing.push('SAIDA_ALMOCO');
+          if (!temRetorno) missing.push('RETORNO_ALMOCO');
+        }
       }
 
       pendencias.push({
@@ -108,7 +135,7 @@ async function pendenciasColaborador(req, res, next) {
     }
 
     pendencias.sort((a, b) => (a.dia < b.dia ? 1 : -1));
-    res.json({ dias, pendencias });
+    res.json({ dias, pendencias, modoMarcacao });
   } catch (err) {
     next(err);
   }
@@ -170,13 +197,24 @@ async function excluirRegistroAdmin(req, res, next) {
     const m = String(motivo || '').trim();
     if (!m) return res.status(400).json({ error: 'Motivo é obrigatório' });
 
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { modoInviolavel: true },
+    });
+    if (tenant?.modoInviolavel) {
+      return res.status(403).json({
+        error: 'Exclusão de registros desabilitada (modo inviolável ativo).',
+        code: 'MODO_INVIOLAVEL',
+      });
+    }
+
     const reg = await prisma.registroPonto.findFirst({
       where: { id: registroId, tenantId },
-      select: { id: true, deletedAt: true },
     });
     if (!reg) return res.status(404).json({ error: 'Registro não encontrado' });
     if (reg.deletedAt) return res.json({ sucesso: true, jaExcluido: true });
 
+    const ipHash = ipHashFromReq(req);
     await prisma.registroPonto.update({
       where: { id: registroId },
       data: {
@@ -187,13 +225,51 @@ async function excluirRegistroAdmin(req, res, next) {
       },
     });
 
+    await registrarAuditoria({
+      tenantId,
+      entidade: 'RegistroPonto',
+      entidadeId: registroId,
+      acao: 'REGISTRO_EXCLUIDO',
+      payloadAntes: {
+        id: reg.id,
+        nsr: reg.nsr,
+        tipo: reg.tipo,
+        dataHora: reg.dataHora,
+        validado: reg.validado,
+      },
+      payloadDepois: { deletedMotivo: m },
+      actorId: adminId,
+      actorRole: req.usuario.role,
+      ipHash,
+    });
+
     return res.json({ sucesso: true });
   } catch (err) {
     next(err);
   }
 }
 
-// Registrar ponto (chamado pelo totem após foto)
+async function comprovantePdf(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const { registroId } = req.params;
+    const usuarioIdColaborador =
+      req.usuario.role === 'COLABORADOR' ? req.usuario.id : null;
+
+    const result = await gerarComprovantePdfStream(registroId, tenantId, usuarioIdColaborador);
+    if (!result) return res.status(404).json({ error: 'Registro não encontrado' });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="comprovante_nsr${result.registro.nsr || registroId}.pdf"`
+    );
+    result.doc.pipe(res);
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function registrar(req, res, next) {
   try {
     const {
@@ -210,21 +286,34 @@ async function registrar(req, res, next) {
     const usuarioId = req.usuario.id;
     const tenantId = req.tenantId || req.usuario.tenantId;
 
-    const usuarioCompleto = await prisma.usuario.findFirst({
-      where: { id: usuarioId, tenantId },
-      select: { localRegistroId: true, isentoGeofence: true },
-    });
-
-    // Valida tipo de ponto
-    const tiposValidos = ['ENTRADA', 'SAIDA_ALMOCO', 'RETORNO_ALMOCO', 'SAIDA'];
-    if (!tiposValidos.includes(tipo)) {
-      return res.status(400).json({ error: 'Tipo de ponto inválido' });
-    }
-
-    // Busca configurações do tenant
     const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
     if (!tenant) {
       return res.status(404).json({ error: 'Empresa não encontrada' });
+    }
+
+    const modoMarcacao = tenant.modoMarcacao || 'QUATRO_BATIDAS';
+    const tiposValidos = tiposPermitidosRegistro(modoMarcacao);
+    if (!tiposValidos.includes(tipo)) {
+      return res.status(400).json({ error: 'Tipo de ponto inválido para o modo de marcação da empresa' });
+    }
+
+    const usuarioCompleto = await prisma.usuario.findFirst({
+      where: { id: usuarioId, tenantId },
+      select: {
+        localRegistroId: true,
+        isentoGeofence: true,
+        cpf: true,
+        pis: true,
+        consentimentoDadosEm: true,
+        consentimentoDadosVersao: true,
+      },
+    });
+
+    if (tenant.exigirCpfPis !== false && !usuarioTemDocumento(usuarioCompleto)) {
+      return res.status(403).json({
+        error: 'CPF ou PIS obrigatório para registrar ponto. Solicite ao RH que complete seu cadastro.',
+        code: 'CPF_PIS_OBRIGATORIO',
+      });
     }
 
     const origemBody = req.body.origem;
@@ -243,9 +332,24 @@ async function registrar(req, res, next) {
       return res.status(403).json({ error: 'Registro pelo meu-ponto está desativado para esta empresa' });
     }
 
-    const agora = new Date();
+    const precisaConsentimento =
+      origem === 'APP_INDIVIDUAL' && (tenant.geofenceAtivo || tenant.fotoObrigatoria);
+    if (precisaConsentimento) {
+      const consentOk =
+        usuarioCompleto?.consentimentoDadosEm &&
+        usuarioCompleto.consentimentoDadosVersao === CONSENTIMENTO_VERSAO_ATUAL;
+      if (!consentOk) {
+        return res.status(403).json({
+          error: 'Aceite o termo de uso de dados (geolocalização/foto) antes de registrar ponto.',
+          code: 'CONSENTIMENTO_OBRIGATORIO',
+          versaoAtual: CONSENTIMENTO_VERSAO_ATUAL,
+        });
+      }
+    }
 
-    // Idempotência: reenvio da fila offline / retry não duplica registro
+    const agora = new Date();
+    const ipHash = ipHashFromReq(req);
+
     if (origem === 'APP_INDIVIDUAL' && clientRequestId) {
       const cid = String(clientRequestId).trim();
       if (cid.length > 0 && cid.length <= 120) {
@@ -254,16 +358,20 @@ async function registrar(req, res, next) {
           include: { usuario: { select: { nome: true, cargo: true } } },
         });
         if (existente) {
+          const prox = determinarProximoTipo(existente.tipo, modoMarcacao);
           return res.status(200).json({
             sucesso: true,
             idempotente: true,
             registro: {
               id: existente.id,
+              nsr: existente.nsr,
               tipo: existente.tipo,
               dataHora: existente.dataHora,
               usuario: existente.usuario.nome,
+              comprovanteUrl: urlComprovante(existente.id),
             },
-            proximoTipo: determinarProximoTipo(existente.tipo),
+            proximoTipo: prox,
+            modoMarcacao,
           });
         }
       }
@@ -281,6 +389,7 @@ async function registrar(req, res, next) {
       }
     }
     const refTime = dataHoraRegistro;
+    const dataHoraUtc = agora;
 
     let clientReqIdDb = null;
     if (origem === 'APP_INDIVIDUAL' && clientRequestId) {
@@ -288,9 +397,7 @@ async function registrar(req, res, next) {
       if (c.length > 0 && c.length <= 120) clientReqIdDb = c;
     }
 
-    // Valida geofence se ativo (cerca única legada ou múltiplos locais)
     let dentroGeofence = null;
-    // Regra: Totem não tem restrição; colaborador isento (remoto) também não.
     if (tenant.geofenceAtivo && origem !== 'TOTEM' && !usuarioCompleto?.isentoGeofence) {
       if (!latitude || !longitude) {
         return res.status(400).json({ error: 'Localização obrigatória para este tenant' });
@@ -338,12 +445,10 @@ async function registrar(req, res, next) {
       }
     }
 
-    // Valida foto se obrigatória
     if (tenant.fotoObrigatoria && !fotoBase64) {
       return res.status(400).json({ error: 'Foto obrigatória para registro de ponto' });
     }
 
-    // Upload da foto para S3
     let fotoUrl = null;
     let fotoKey = null;
     if (fotoBase64) {
@@ -352,16 +457,6 @@ async function registrar(req, res, next) {
       fotoKey = resultado.key;
     }
 
-    // Hash do IP para auditoria sem expor IP real
-    const ipHash = crypto
-      .createHash('sha256')
-      .update(req.ip || '')
-      .digest('hex')
-      .substring(0, 16);
-
-    // ---- REGRA ANTI-DUPLICIDADE (um tipo por dia) ----
-    // Evita problemas no relatório: não pode ter 2 entradas ou 2 saídas no mesmo dia, etc.
-    // (admin pode corrigir ajustando horário do registro existente)
     {
       const { inicio, fim } = inicioFimDoDia(refTime);
       const jaExiste = await prisma.registroPonto.findFirst({
@@ -385,12 +480,6 @@ async function registrar(req, res, next) {
       }
     }
 
-    // ---- PAREAMENTO / ESQUECIMENTO DE SAÍDA ----
-    // Regras:
-    // - Fluxo normal: o tipo deve ser o próximo esperado pela sequência.
-    // - Se o último registro "abre" um ciclo e já se passaram >= 16h, assume saída esquecida:
-    //   marca o último como não validado e força uma nova ENTRADA (gera pendência para ajuste).
-    // - Se o colaborador explicitamente escolher "iniciar novo turno", permitimos ENTRADA mesmo fora da sequência.
     const ultimo = await prisma.registroPonto.findFirst({
       where: { tenantId, usuarioId, deletedAt: null },
       orderBy: { dataHora: 'desc' },
@@ -398,17 +487,13 @@ async function registrar(req, res, next) {
     });
 
     const ultimoEhHoje = Boolean(ultimo) && isSameLocalDay(ultimo.dataHora, refTime);
-    // A sequência que controla o "tipo esperado" deve ser por dia:
-    // - se não há registro hoje, o esperado é ENTRADA (mesmo que ontem tenha ficado "aberto").
-    // - se há registro hoje, segue a sequência normal baseada no último de hoje.
-    const proximoEsperado = ultimoEhHoje ? determinarProximoTipo(ultimo?.tipo) : 'ENTRADA';
-    const ultimoAbreCiclo = Boolean(ultimo) && ultimo.tipo !== 'SAIDA';
+    const proximoEsperado = ultimoEhHoje
+      ? determinarProximoTipo(ultimo?.tipo, modoMarcacao)
+      : 'ENTRADA';
+    const ultimoAbreCiclo = Boolean(ultimo) && !ultimoTipoFechaCiclo(ultimo.tipo, modoMarcacao);
     const horasDesdeUltimo = ultimo ? diffHoras(refTime, ultimo.dataHora) : 0;
     const segundosDesdeUltimo = ultimo ? diffSegundos(refTime, ultimo.dataHora) : 0;
 
-    // ---- BLOQUEIO: batida seguida / duplo-clique / reenvio rápido ----
-    // Mesmo com a sequência correta, um toque duplo ou retry pode gerar marcações em sequência.
-    // Protegemos com um cooldown curto para qualquer tipo de registro.
     if (ultimo?.id && segundosDesdeUltimo < COOLDOWN_BATIDA_SEGUNDOS) {
       return res.status(409).json({
         error: 'Registro muito próximo do anterior. Aguarde alguns segundos e tente novamente.',
@@ -423,8 +508,6 @@ async function registrar(req, res, next) {
       });
     }
 
-    // Virou o dia com ciclo aberto: primeira batida de hoje segue a sequência do dia atual;
-    // o dia anterior fica sinalizado para ajuste (aba Pendências / RH).
     if (!forcarNovoTurno && !ultimoEhHoje && ultimoAbreCiclo && ultimo?.id) {
       await prisma.registroPonto.update({
         where: { id: ultimo.id },
@@ -432,38 +515,37 @@ async function registrar(req, res, next) {
       });
     }
 
-    // Turno aberto há 16h+ no MESMO dia: encerra ciclo e abre nova entrada automaticamente.
-    // Se virou o dia, não usa este atalho — o fluxo normal de ENTRADA do dia atual + pendência do dia anterior.
+    const dadosRegistroBase = {
+      tenantId,
+      usuarioId,
+      latitude: latitude ? parseFloat(latitude) : null,
+      longitude: longitude ? parseFloat(longitude) : null,
+      dentroGeofence,
+      fotoUrl,
+      fotoKey,
+      deviceId,
+      ipHash,
+      userAgent: req.headers['user-agent']?.substring(0, 200),
+      origem,
+      clientRequestId: clientReqIdDb,
+      actorId: usuarioId,
+      actorRole: req.usuario.role,
+    };
+
     if (ultimoEhHoje && ultimoAbreCiclo && horasDesdeUltimo >= LIMITE_TURNO_MAX_HORAS) {
-      // Saída do ciclo anterior provavelmente foi esquecida.
-      // Força nova entrada e abre pendência no registro anterior (não validado).
       await prisma.registroPonto.update({
         where: { id: ultimo.id },
         data: { validado: false },
       });
 
-      const registro = await prisma.registroPonto.create({
-        data: {
-          tenantId,
-          usuarioId,
-          tipo: 'ENTRADA',
-          dataHora: dataHoraRegistro,
-          latitude: latitude ? parseFloat(latitude) : null,
-          longitude: longitude ? parseFloat(longitude) : null,
-          dentroGeofence,
-          fotoUrl,
-          fotoKey,
-          deviceId,
-          ipHash,
-          userAgent: req.headers['user-agent']?.substring(0, 200),
-          origem,
-          clientRequestId: clientReqIdDb,
-        },
-        include: {
-          usuario: { select: { nome: true, cargo: true } },
-        },
+      const registro = await criarRegistroPonto({
+        ...dadosRegistroBase,
+        tipo: 'ENTRADA',
+        dataHora: dataHoraRegistro,
+        dataHoraUtc,
       });
 
+      const prox = determinarProximoTipo(registro.tipo, modoMarcacao);
       return res.status(201).json({
         sucesso: true,
         aviso: {
@@ -478,17 +560,12 @@ async function registrar(req, res, next) {
             limiteHoras: LIMITE_TURNO_MAX_HORAS,
           },
         },
-        registro: {
-          id: registro.id,
-          tipo: registro.tipo,
-          dataHora: registro.dataHora,
-          usuario: registro.usuario.nome,
-        },
-        proximoTipo: determinarProximoTipo(registro.tipo),
+        registro: registroResponse(registro, prox),
+        proximoTipo: prox,
+        modoMarcacao,
       });
     }
 
-    // Se o usuário escolheu "iniciar novo turno", permite ENTRADA fora da sequência
     if (forcarNovoTurno === true) {
       if (tipo !== 'ENTRADA') {
         return res.status(400).json({ error: 'Para iniciar um novo turno, o tipo deve ser ENTRADA.' });
@@ -499,21 +576,16 @@ async function registrar(req, res, next) {
           data: { validado: false },
         });
       }
-    } else {
-      // Fluxo normal: exige o tipo esperado
-      if (tipo !== proximoEsperado) {
-        return res.status(409).json({
-          error: 'Tipo de ponto inesperado para a sequência atual.',
-          code: 'TIPO_INESPERADO',
-          esperado: proximoEsperado,
-        });
-      }
+    } else if (tipo !== proximoEsperado) {
+      return res.status(409).json({
+        error: 'Tipo de ponto inesperado para a sequência atual.',
+        code: 'TIPO_INESPERADO',
+        esperado: proximoEsperado,
+        modoMarcacao,
+      });
     }
 
-    // ---- AVISO: registro muito cedo (sequencial) ----
-    // Ex.: tentou retornar do almoço com 5 min, ou tentar sair com poucos minutos de trabalho.
-    // O colaborador pode confirmar para prosseguir mesmo assim.
-    if (!forcarNovoTurno && confirmarRegistroCurto !== true) {
+    if (!forcarNovoTurno && confirmarRegistroCurto !== true && modoMarcacao !== 'DUAS_BATIDAS') {
       const minTrabalhoAntesSaidaMin =
         tenant?.trabalhoMinimoAntesSaidaMinutos ?? DEFAULT_MIN_TRABALHO_ANTES_SAIDA_MIN;
       const minIntervaloAlmocoMin =
@@ -529,7 +601,6 @@ async function registrar(req, res, next) {
       if (ultimoHoje?.id) {
         const minutos = diffMinutos(refTime, ultimoHoje.dataHora);
 
-        // SAIDA_ALMOCO ou SAIDA logo após ENTRADA/RETORNO
         if (
           (tipo === 'SAIDA_ALMOCO' || tipo === 'SAIDA') &&
           (ultimoHoje.tipo === 'ENTRADA' || ultimoHoje.tipo === 'RETORNO_ALMOCO') &&
@@ -548,7 +619,6 @@ async function registrar(req, res, next) {
           });
         }
 
-        // RETORNO_ALMOCO logo após SAIDA_ALMOCO
         if (tipo === 'RETORNO_ALMOCO' && ultimoHoje.tipo === 'SAIDA_ALMOCO' && minutos < minIntervaloAlmocoMin) {
           return res.status(409).json({
             error:
@@ -565,30 +635,14 @@ async function registrar(req, res, next) {
       }
     }
 
-    // Registra no banco
-    const registro = await prisma.registroPonto.create({
-      data: {
-        tenantId,
-        usuarioId,
-        tipo,
-        dataHora: dataHoraRegistro,
-        latitude: latitude ? parseFloat(latitude) : null,
-        longitude: longitude ? parseFloat(longitude) : null,
-        dentroGeofence,
-        fotoUrl,
-        fotoKey,
-        deviceId,
-        ipHash,
-        userAgent: req.headers['user-agent']?.substring(0, 200),
-        origem,
-        clientRequestId: clientReqIdDb,
-      },
-      include: {
-        usuario: { select: { nome: true, cargo: true } }
-      }
+    const registro = await criarRegistroPonto({
+      ...dadosRegistroBase,
+      tipo,
+      dataHora: dataHoraRegistro,
+      dataHoraUtc,
     });
 
-    // Se marcou pendência por virada de dia (ontem em aberto), devolve aviso para o frontend mostrar ao colaborador.
+    const prox = determinarProximoTipo(registro.tipo, modoMarcacao);
     const avisoViradaDia =
       !forcarNovoTurno && !ultimoEhHoje && ultimoAbreCiclo && ultimo?.id
         ? {
@@ -606,18 +660,15 @@ async function registrar(req, res, next) {
     res.status(201).json({
       sucesso: true,
       ...(avisoViradaDia ? { aviso: avisoViradaDia } : {}),
-      registro: {
-        id: registro.id,
-        tipo: registro.tipo,
-        dataHora: registro.dataHora,
-        usuario: registro.usuario.nome,
-      },
-      proximoTipo: determinarProximoTipo(registro.tipo),
+      registro: registroResponse(registro, prox),
+      proximoTipo: prox,
+      modoMarcacao,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 }
 
-// Listar registros (para o dashboard do gerente)
 async function listar(req, res, next) {
   try {
     const tenantId = req.tenantId;
@@ -631,7 +682,7 @@ async function listar(req, res, next) {
         dataHora: {
           gte: new Date(dataInicio),
           lte: new Date(dataFim + 'T23:59:59'),
-        }
+        },
       }),
     };
 
@@ -640,22 +691,20 @@ async function listar(req, res, next) {
         where,
         include: {
           usuario: { select: { nome: true, cargo: true, departamento: true } },
-          ajuste: { select: { dataHoraNova: true, motivo: true } }
+          ajuste: { select: { dataHoraNova: true, motivo: true } },
         },
         orderBy: { dataHora: 'desc' },
         skip: (pagina - 1) * limite,
         take: parseInt(limite),
       }),
-      prisma.registroPonto.count({ where })
+      prisma.registroPonto.count({ where }),
     ]);
 
-    // Gera URLs assinadas para as fotos (expiram em 15 min)
     const registrosComFoto = await Promise.all(
       registros.map(async (r) => ({
         ...r,
-        fotoUrl: r.fotoKey
-          ? await gerarUrlAssinada(r.fotoKey)
-          : (r.fotoUrl || null),
+        fotoUrl: r.fotoKey ? await gerarUrlAssinada(r.fotoKey) : r.fotoUrl || null,
+        comprovanteUrl: urlComprovante(r.id),
       }))
     );
 
@@ -665,10 +714,11 @@ async function listar(req, res, next) {
       paginas: Math.ceil(total / limite),
       paginaAtual: parseInt(pagina),
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  }
 }
 
-// Buscar último ponto do colaborador (para mostrar no totem)
 async function ultimoPonto(req, res, next) {
   try {
     if (req.isSuperAdmin) {
@@ -692,24 +742,27 @@ async function ultimoPonto(req, res, next) {
       if (!alvo) return res.status(404).json({ error: 'Colaborador não encontrado' });
     }
 
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { modoMarcacao: true },
+    });
+    const modoMarcacao = tenant?.modoMarcacao || 'QUATRO_BATIDAS';
+
     const ultimo = await prisma.registroPonto.findFirst({
       where: { usuarioId, tenantId, deletedAt: null },
       orderBy: { dataHora: 'desc' },
-      select: { id: true, tipo: true, dataHora: true, validado: true }
+      select: { id: true, tipo: true, dataHora: true, validado: true, nsr: true },
     });
 
     const agora = new Date();
     const ultimoEhHoje = Boolean(ultimo) && isSameLocalDay(ultimo.dataHora, agora);
-    // Próximo tipo esperado por dia:
-    // - se não há registro hoje, começa por ENTRADA
-    // - se há registro hoje, segue a sequência baseada no último de hoje
-    const proximoTipo = ultimoEhHoje ? determinarProximoTipo(ultimo?.tipo) : 'ENTRADA';
+    const proximoTipo = ultimoEhHoje
+      ? determinarProximoTipo(ultimo?.tipo, modoMarcacao)
+      : 'ENTRADA';
 
-    // Pendência na UI: modal só no mesmo dia com turno aberto há muito tempo.
-    // Virada de dia com ciclo aberto → aviso leve; batidas faltantes vão para GET /pendencias.
     const pendenciaCheckin = (() => {
       if (!ultimo) return { aberta: false };
-      if (ultimo.tipo === 'SAIDA') return { aberta: false };
+      if (ultimoTipoFechaCiclo(ultimo.tipo, modoMarcacao)) return { aberta: false };
       const horas = diffHoras(new Date(), ultimo.dataHora);
       if (!ultimoEhHoje) {
         return {
@@ -736,20 +789,10 @@ async function ultimoPonto(req, res, next) {
       };
     })();
 
-    res.json({ ultimoPonto: ultimo, proximoTipo, pendenciaCheckin });
-  } catch (err) { next(err); }
-}
-
-function determinarProximoTipo(ultimoTipo) {
-  const sequencia = {
-    null: 'ENTRADA',
-    undefined: 'ENTRADA',
-    ENTRADA: 'SAIDA_ALMOCO',
-    SAIDA_ALMOCO: 'RETORNO_ALMOCO',
-    RETORNO_ALMOCO: 'SAIDA',
-    SAIDA: 'ENTRADA',
-  };
-  return sequencia[ultimoTipo] || 'ENTRADA';
+    res.json({ ultimoPonto: ultimo, proximoTipo, pendenciaCheckin, modoMarcacao });
+  } catch (err) {
+    next(err);
+  }
 }
 
 module.exports = {
@@ -759,4 +802,5 @@ module.exports = {
   pendenciasColaborador,
   solicitarAjusteColaborador,
   excluirRegistroAdmin,
+  comprovantePdf,
 };

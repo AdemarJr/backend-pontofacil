@@ -7,8 +7,15 @@ const {
   fechamentoStatus,
   fechamentoAprovar,
 } = require('../controllers/relatorio.controller');
+const {
+  statusConsentimento,
+  registrarConsentimento,
+} = require('../controllers/colaborador.controller');
 
 router.use(autenticar, exigirColaborador);
+
+router.get('/consentimento', statusConsentimento);
+router.post('/consentimento', registrarConsentimento);
 
 // Espelho mensal do próprio colaborador
 router.get('/espelho', espelhoMeu);

@@ -16,6 +16,10 @@ const {
 
 const prisma = require('../infra/prisma');
 const { montarPorUsuarioEspelho, montarEspelhoMensal } = require('../modules/relatorios/espelho.service');
+const { criarRegistroPonto } = require('../modules/ponto/registroPonto.service');
+const { registrarAuditoria, ipHashFromReq } = require('../shared/auditoria.service');
+const { gerarPreAfdTxt } = require('../modules/fiscal/afdExport.service');
+const { gerarAejCsv } = require('../modules/fiscal/aejExport.service');
 
 /**
  * Campos do RegistroPonto usados pelo espelho/relatórios.
@@ -1131,6 +1135,18 @@ async function ajustarPonto(req, res, next) {
       },
     });
 
+    await registrarAuditoria({
+      tenantId,
+      entidade: 'RegistroPonto',
+      entidadeId: registroId,
+      acao: 'REGISTRO_AJUSTADO',
+      payloadAntes: { dataHora: registro.dataHora, nsr: registro.nsr },
+      payloadDepois: { dataHoraNova: dhNova, motivo },
+      actorId: adminId,
+      actorRole: req.usuario.role,
+      ipHash: ipHashFromReq(req),
+    });
+
     res.json({ sucesso: true, ajuste });
   } catch (err) {
     next(err);
@@ -1177,19 +1193,20 @@ async function inserirPontoManual(req, res, next) {
       });
     }
 
-    const registro = await prisma.registroPonto.create({
-      data: {
-        tenantId,
-        usuarioId,
-        tipo: String(tipo).toUpperCase(),
-        dataHora: dh,
-        origem: 'ADMIN_MANUAL',
-        validado: true,
-      },
+    const registro = await criarRegistroPonto({
+      tenantId,
+      usuarioId,
+      tipo: String(tipo).toUpperCase(),
+      dataHora: dh,
+      dataHoraUtc: new Date(),
+      origem: 'ADMIN_MANUAL',
+      validado: true,
+      actorId: adminId,
+      actorRole: req.usuario.role,
+      ipHash: ipHashFromReq(req),
+      acaoAuditoria: 'REGISTRO_MANUAL',
     });
 
-    // Reaproveita a tabela de ajustes como trilha/auditoria da justificativa,
-    // mesmo quando o registro já nasce com o horário "correto".
     const ajuste = await prisma.ajustePonto.create({
       data: {
         tenantId,
@@ -1304,15 +1321,18 @@ async function decidirSolicitacaoAjuste(req, res, next) {
     const motivoBase = `[Solicitação colaborador] ${sol.justificativa}`;
     const motivoFinal = respostaAdmin ? `${motivoBase}\n[Resposta admin] ${String(respostaAdmin).trim()}` : motivoBase;
 
-    const registro = await prisma.registroPonto.create({
-      data: {
-        tenantId,
-        usuarioId: sol.usuarioId,
-        tipo: sol.tipo,
-        dataHora: dh,
-        origem: 'ADMIN_MANUAL',
-        validado: true,
-      },
+    const registro = await criarRegistroPonto({
+      tenantId,
+      usuarioId: sol.usuarioId,
+      tipo: sol.tipo,
+      dataHora: dh,
+      dataHoraUtc: new Date(),
+      origem: 'ADMIN_MANUAL',
+      validado: true,
+      actorId: adminId,
+      actorRole: req.usuario.role,
+      ipHash: ipHashFromReq(req),
+      acaoAuditoria: 'REGISTRO_MANUAL',
     });
 
     const ajuste = await prisma.ajustePonto.create({
@@ -1343,6 +1363,114 @@ async function decidirSolicitacaoAjuste(req, res, next) {
   }
 }
 
+async function exportPreAfd(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const { dataInicio, dataFim } = req.query;
+    if (!dataInicio || !dataFim) {
+      return res.status(400).json({ error: 'dataInicio e dataFim são obrigatórios (YYYY-MM-DD)' });
+    }
+    const { conteudo, nomeArquivo } = await gerarPreAfdTxt({ tenantId, dataInicio, dataFim });
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${nomeArquivo}"`);
+    return res.send(conteudo);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function exportAej(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const { mes, ano, usuarioId } = req.query;
+    if (!mes || !ano) {
+      return res.status(400).json({ error: 'mes e ano são obrigatórios' });
+    }
+    const { conteudo, nomeArquivo } = await gerarAejCsv({
+      tenantId,
+      mes,
+      ano,
+      usuarioId: usuarioId || null,
+    });
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${nomeArquivo}"`);
+    return res.send(conteudo);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function listarAuditoria(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const { dataInicio, dataFim, acao, pagina = 1, limite = 100 } = req.query;
+    const take = Math.min(500, Math.max(1, parseInt(limite, 10)));
+    const skip = (Math.max(1, parseInt(pagina, 10)) - 1) * take;
+
+    const where = { tenantId };
+    if (acao) where.acao = String(acao);
+    if (dataInicio && dataFim) {
+      where.createdAt = {
+        gte: new Date(dataInicio + 'T00:00:00'),
+        lte: new Date(dataFim + 'T23:59:59.999'),
+      };
+    }
+
+    const [eventos, total] = await Promise.all([
+      prisma.auditoriaEvento.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take,
+      }),
+      prisma.auditoriaEvento.count({ where }),
+    ]);
+
+    return res.json({ eventos, total, pagina: parseInt(pagina, 10), limite: take });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function exportAuditoriaCsv(req, res, next) {
+  try {
+    const tenantId = req.tenantId;
+    const { dataInicio, dataFim, acao } = req.query;
+    const where = { tenantId };
+    if (acao) where.acao = String(acao);
+    if (dataInicio && dataFim) {
+      where.createdAt = {
+        gte: new Date(dataInicio + 'T00:00:00'),
+        lte: new Date(dataFim + 'T23:59:59.999'),
+      };
+    }
+
+    const eventos = await prisma.auditoriaEvento.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 5000,
+    });
+
+    const header = 'data;acao;entidade;entidadeId;actorId;actorRole';
+    const linhas = eventos.map((e) =>
+      [
+        e.createdAt.toISOString(),
+        e.acao,
+        e.entidade,
+        e.entidadeId,
+        e.actorId || '',
+        e.actorRole || '',
+      ].join(';')
+    );
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="auditoria.csv"');
+    return res.send([header, ...linhas].join('\n') + '\n');
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   espelhoPonto,
   espelhoExport,
@@ -1357,4 +1485,8 @@ module.exports = {
   inserirPontoManual,
   listarSolicitacoesAjuste,
   decidirSolicitacaoAjuste,
+  exportPreAfd,
+  exportAej,
+  listarAuditoria,
+  exportAuditoriaCsv,
 };

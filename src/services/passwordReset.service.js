@@ -10,8 +10,7 @@ function frontendBase() {
   const raw = String(process.env.FRONTEND_URL || '').trim();
   const fallback = 'https://pontofacil.digital';
 
-  // Em produção, precisamos do FRONTEND_URL correto para o redirect_to do Supabase
-  // e para qualquer link que saia do backend. Evita enviar e-mails com localhost.
+  // Em produção, precisamos do FRONTEND_URL correto para links de convite e recuperação de senha.
   if (!raw) {
     if (process.env.NODE_ENV === 'production') {
       const err = new Error('FRONTEND_URL é obrigatório em produção (ex.: https://app.seudominio.com)');
@@ -357,6 +356,8 @@ module.exports = {
   isMailConfigured,
   buildResetLink,
   sendConviteUsuario,
+  sendResetUsuarioEmail,
+  sendResetSuperAdminEmail,
   requestForgotByEmail,
   resetPasswordWithToken,
   issueUsuarioToken,

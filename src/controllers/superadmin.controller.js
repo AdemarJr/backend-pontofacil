@@ -2,12 +2,27 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
-const { frontendBase } = require('../services/passwordReset.service');
-const { sendPasswordResetEmail, sendFirstAccessInviteEmail } = require('../services/supabaseAuth.service');
+const { sendConviteUsuario, sendResetUsuarioEmail } = require('../services/passwordReset.service');
 
 const prisma = require('../infra/prisma');
 const { resolverDadosContrato, diasAteExpiracao } = require('../shared/contractPeriod');
 const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
+
+const MODOS_MARCACAO_VALIDOS = ['QUATRO_BATIDAS', 'DUAS_BATIDAS'];
+
+function resolverModoMarcacao(val, { obrigatorio = false } = {}) {
+  if (val == null || val === '') {
+    if (obrigatorio) {
+      return { erro: 'Modo de marcação inválido. Use QUATRO_BATIDAS ou DUAS_BATIDAS.' };
+    }
+    return { modo: 'QUATRO_BATIDAS' };
+  }
+  const modo = String(val).toUpperCase();
+  if (!MODOS_MARCACAO_VALIDOS.includes(modo)) {
+    return { erro: 'Modo de marcação inválido. Use QUATRO_BATIDAS ou DUAS_BATIDAS.' };
+  }
+  return { modo };
+}
 
 function responderErroSchemaPrisma(err, res) {
   const msg = String(err?.message || '');
@@ -18,7 +33,7 @@ function responderErroSchemaPrisma(err, res) {
   if (!schemaDesatualizado) return false;
   res.status(500).json({
     error:
-      'Banco de dados desatualizado para o módulo de folha. Execute folha-pagamento-atualizacao.sql no Supabase (PARTE 1 e PARTE 2) e reinicie o backend.',
+      'Banco de dados desatualizado. Rode `npx prisma migrate deploy` no servidor e reinicie o backend.',
     code: 'DB_SCHEMA_OUTDATED',
   });
   return true;
@@ -56,8 +71,13 @@ async function criarTenant(req, res, next) {
   try {
     const {
       razaoSocial, nomeFantasia, cnpj, email, telefone, plano,
-      adminNome, adminEmail, adminSenha,
+      adminNome, adminEmail, adminSenha, modoMarcacao,
     } = req.body;
+
+    const modoResolvido = resolverModoMarcacao(modoMarcacao);
+    if (modoResolvido.erro) {
+      return res.status(400).json({ error: modoResolvido.erro });
+    }
 
     if (!razaoSocial || !nomeFantasia || !cnpj || !email) {
       return res.status(400).json({ error: 'Razão social, nome fantasia, CNPJ e e-mail da empresa são obrigatórios' });
@@ -94,6 +114,7 @@ async function criarTenant(req, res, next) {
           email,
           telefone: telefone || null,
           plano: plano || 'BASICO',
+          modoMarcacao: modoResolvido.modo,
         },
       });
       await tx.tenantFeature.create({
@@ -117,13 +138,11 @@ async function criarTenant(req, res, next) {
     let conviteAdminErro = null;
     if (!comSenha) {
       try {
-        const redirectTo = `${frontendBase()}/redefinir-senha`;
-        await sendFirstAccessInviteEmail(adminEmailNorm, redirectTo, {
-          nome: resultado.admin.nome,
-          role: 'ADMIN',
-          tenantId: resultado.tenant.id,
-        });
-        conviteAdminEnviado = true;
+        const r = await sendConviteUsuario(resultado.admin.id);
+        conviteAdminEnviado = Boolean(r.ok);
+        if (!r.ok) {
+          conviteAdminErro = r.skipped ? 'SMTP não configurado' : (r.reason || 'Falha ao enviar convite');
+        }
       } catch (e) {
         console.error('[superadmin/criarTenant] Convite falhou (empresa já criada):', e?.message || e);
         conviteAdminEnviado = false;
@@ -150,8 +169,17 @@ async function atualizarTenant(req, res, next) {
     const { id } = req.params;
     const {
       razaoSocial, nomeFantasia, cnpj, email, telefone, plano,
-      payrollModuleEnabled, contractStartDate, periodoContrato,
+      payrollModuleEnabled, contractStartDate, periodoContrato, modoMarcacao,
     } = req.body;
+
+    let modoMarcacaoAtualizado;
+    if (modoMarcacao !== undefined) {
+      const modoResolvido = resolverModoMarcacao(modoMarcacao, { obrigatorio: true });
+      if (modoResolvido.erro) {
+        return res.status(400).json({ error: modoResolvido.erro });
+      }
+      modoMarcacaoAtualizado = modoResolvido.modo;
+    }
 
     const existente = await prisma.tenant.findUnique({ where: { id } });
     if (!existente) return res.status(404).json({ error: 'Empresa não encontrada' });
@@ -189,6 +217,7 @@ async function atualizarTenant(req, res, next) {
           ...(email !== undefined && { email }),
           ...(telefone !== undefined && { telefone: telefone || null }),
           ...(plano !== undefined && { plano }),
+          ...(modoMarcacaoAtualizado !== undefined && { modoMarcacao: modoMarcacaoAtualizado }),
           ...(dadosContrato && dadosContrato),
         },
       });
@@ -370,13 +399,11 @@ async function criarAdminTenant(req, res, next) {
     let conviteEmailErro = null;
     if (!comSenha) {
       try {
-        const redirectTo = `${frontendBase()}/redefinir-senha`;
-        await sendFirstAccessInviteEmail(usuario.email, redirectTo, {
-          nome: usuario.nome,
-          role: 'ADMIN',
-          tenantId,
-        });
-        conviteEmailEnviado = true;
+        const r = await sendConviteUsuario(usuario.id);
+        conviteEmailEnviado = Boolean(r.ok);
+        if (!r.ok) {
+          conviteEmailErro = r.skipped ? 'SMTP não configurado' : (r.reason || 'Falha ao enviar convite');
+        }
       } catch (e) {
         console.error('[superadmin/criarAdmin] Convite falhou (admin já criado):', e?.message || e);
         conviteEmailEnviado = false;
@@ -399,8 +426,7 @@ async function criarAdminTenant(req, res, next) {
 }
 
 /**
- * Resetar senha (PIN) de um ADMIN da empresa.
- * Dispara e-mail de recuperação via Supabase (Reset password).
+ * Resetar senha de um ADMIN da empresa — envia link por e-mail (SMTP).
  */
 async function resetSenhaAdminTenant(req, res, next) {
   try {
@@ -408,26 +434,30 @@ async function resetSenhaAdminTenant(req, res, next) {
 
     const usuario = await prisma.usuario.findFirst({
       where: { id: adminId, tenantId, role: 'ADMIN' },
-      select: { id: true, nome: true, email: true, ativo: true },
+      include: { tenant: { select: { nomeFantasia: true } } },
     });
     if (!usuario) {
       return res.status(404).json({ error: 'Administrador não encontrado para esta empresa' });
     }
 
-    try {
-      const redirectTo = `${frontendBase()}/redefinir-senha`;
-      await sendPasswordResetEmail(usuario.email, redirectTo);
-    } catch (e) {
-      if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
-      throw e;
+    const r = await sendResetUsuarioEmail(usuario);
+    if (!r?.ok) {
+      const err = new Error(
+        r?.skipped
+          ? 'Servidor sem SMTP configurado para envio de e-mails.'
+          : 'Falha ao enviar e-mail de recuperação.'
+      );
+      err.status = r?.skipped ? 503 : 502;
+      throw err;
     }
 
     return res.json({
-      usuario,
+      usuario: { id: usuario.id, nome: usuario.nome, email: usuario.email, ativo: usuario.ativo },
       sucesso: true,
       emailEnviado: true,
     });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
   }
 }
@@ -483,7 +513,7 @@ async function limparRegistrosTenant(req, res, next) {
   }
 }
 
-/** Reenviar convite de primeiro acesso (Supabase Invite) para um ADMIN */
+/** Reenviar convite de primeiro acesso por e-mail (SMTP) para um ADMIN */
 async function reenviarConviteAdminTenant(req, res, next) {
   try {
     const { id: tenantId, adminId } = req.params;
@@ -493,15 +523,20 @@ async function reenviarConviteAdminTenant(req, res, next) {
     });
     if (!u) return res.status(404).json({ error: 'Administrador não encontrado para esta empresa' });
 
-    const redirectTo = `${frontendBase()}/redefinir-senha`;
-    await sendFirstAccessInviteEmail(u.email, redirectTo, {
-      nome: u.nome,
-      role: 'ADMIN',
-      tenantId,
-    });
+    const r = await sendConviteUsuario(u.id);
+    if (!r.ok) {
+      const err = new Error(
+        r.skipped
+          ? 'Servidor sem SMTP configurado para envio de e-mails.'
+          : 'Falha ao enviar convite por e-mail.'
+      );
+      err.status = r.skipped ? 503 : 502;
+      throw err;
+    }
 
     return res.json({ sucesso: true, emailEnviado: true, usuario: u });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     return next(err);
   }
 }

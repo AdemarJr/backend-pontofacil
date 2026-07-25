@@ -1,6 +1,10 @@
-# Credenciais e ambiente
+# Credenciais e ambiente — nunca commitar (exceto .env.example)
 .env
 .env.*
+.env-*
+hom.env
+hom.env.*
+*.env.local
 !.env.example
 *.pem
 *.key
@@ -29,6 +33,3 @@ coverage/
 tmp/
 temp/
 uploads/
-
-# Explicit: never commit production env
-.env.production

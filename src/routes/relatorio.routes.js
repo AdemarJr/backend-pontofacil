@@ -11,6 +11,10 @@ const {
   listarSolicitacoesAjuste,
   decidirSolicitacaoAjuste,
   solicitarAssinaturaEspelho,
+  exportPreAfd,
+  exportAej,
+  listarAuditoria,
+  exportAuditoriaCsv,
 } = require('../controllers/relatorio.controller');
 
 router.use(autenticar, exigirAdmin);
@@ -19,6 +23,10 @@ router.get('/espelho/export', espelhoExport); // ?format=csv|xlsx|pdf
 router.post('/espelho/solicitar-assinatura', solicitarAssinaturaEspelho);
 router.get('/banco-horas', bancoHorasResumo);
 router.get('/resumo-dia', resumoDia);
+router.get('/afd/export', exportPreAfd);
+router.get('/aej/export', exportAej);
+router.get('/auditoria', listarAuditoria);
+router.get('/auditoria/export', exportAuditoriaCsv);
 router.post('/ajuste', ajustarPonto);
 router.post('/inserir', inserirPontoManual);
 router.get('/solicitacoes-ajuste', listarSolicitacoesAjuste);
