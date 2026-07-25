@@ -5,8 +5,8 @@ const {
   loginEmail,
   loginPin,
   refreshToken,
-  esqueciSenhaSupabase,
-  redefinirSenhaSupabase,
+  esqueciSenha,
+  redefinirSenha,
   enviarConviteGerente,
 } = require('../controllers/auth.controller');
 const { autenticar, exigirAdmin } = require('../middlewares/auth.middleware');
@@ -27,7 +27,6 @@ const resetLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Max 10 manager invites per hour per IP to prevent abuse
 const inviteLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -39,10 +38,8 @@ const inviteLimiter = rateLimit({
 router.post('/login', loginEmail);
 router.post('/login-pin', loginPin);
 router.post('/refresh', refreshToken);
-// Password recovery via Supabase Auth (avoids Railway SMTP egress blocking)
-router.post('/forgot-password', forgotLimiter, esqueciSenhaSupabase);
-router.post('/reset-password', resetLimiter, redefinirSenhaSupabase);
-// Send welcome/invitation email to a new manager — requires authenticated admin
+router.post('/forgot-password', forgotLimiter, esqueciSenha);
+router.post('/reset-password', resetLimiter, redefinirSenha);
 router.post('/send-manager-invite', autenticar, exigirAdmin, inviteLimiter, enviarConviteGerente);
 
 module.exports = router;
