@@ -7,6 +7,7 @@ const { sendConviteUsuario, sendResetUsuarioEmail } = require('../services/passw
 const prisma = require('../infra/prisma');
 const { resolverDadosContrato, diasAteExpiracao } = require('../shared/contractPeriod');
 const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
+const { mapearEnumPorMaxColaboradores } = require('../shared/planLimits');
 
 const MODOS_MARCACAO_VALIDOS = ['QUATRO_BATIDAS', 'DUAS_BATIDAS'];
 
@@ -43,6 +44,7 @@ async function listarTenants(req, res, next) {
   try {
     const tenants = await prisma.tenant.findMany({
       include: {
+        planoComercial: true,
         _count: { select: { usuarios: true, registros: true } },
         usuarios: {
           where: { role: 'ADMIN' },
@@ -70,7 +72,7 @@ async function listarTenants(req, res, next) {
 async function criarTenant(req, res, next) {
   try {
     const {
-      razaoSocial, nomeFantasia, cnpj, email, telefone, plano,
+      razaoSocial, nomeFantasia, cnpj, email, telefone, plano, planoComercialId,
       adminNome, adminEmail, adminSenha, modoMarcacao,
     } = req.body;
 
@@ -105,6 +107,20 @@ async function criarTenant(req, res, next) {
 
     const adminEmailNorm = String(adminEmail).trim().toLowerCase();
 
+    let planoComercialResolved = null;
+    if (planoComercialId) {
+      planoComercialResolved = await prisma.planoComercial.findFirst({
+        where: { id: planoComercialId, ativo: true },
+      });
+      if (!planoComercialResolved) {
+        return res.status(400).json({ error: 'Plano comercial inválido ou inativo' });
+      }
+    }
+
+    const enumPlano = planoComercialResolved
+      ? mapearEnumPorMaxColaboradores(planoComercialResolved.maxColaboradores)
+      : (plano || 'BASICO');
+
     const resultado = await prisma.$transaction(async (tx) => {
       const t = await tx.tenant.create({
         data: {
@@ -113,7 +129,8 @@ async function criarTenant(req, res, next) {
           cnpj,
           email,
           telefone: telefone || null,
-          plano: plano || 'BASICO',
+          plano: enumPlano,
+          planoComercialId: planoComercialResolved?.id || null,
           modoMarcacao: modoResolvido.modo,
         },
       });
@@ -168,7 +185,7 @@ async function atualizarTenant(req, res, next) {
   try {
     const { id } = req.params;
     const {
-      razaoSocial, nomeFantasia, cnpj, email, telefone, plano,
+      razaoSocial, nomeFantasia, cnpj, email, telefone, plano, planoComercialId,
       payrollModuleEnabled, contractStartDate, periodoContrato, modoMarcacao,
     } = req.body;
 
@@ -207,6 +224,24 @@ async function atualizarTenant(req, res, next) {
       }
     }
 
+    let planoPatch = {};
+    if (planoComercialId !== undefined) {
+      if (planoComercialId === null || planoComercialId === '') {
+        planoPatch = { planoComercialId: null };
+      } else {
+        const pc = await prisma.planoComercial.findFirst({
+          where: { id: planoComercialId, ativo: true },
+        });
+        if (!pc) return res.status(400).json({ error: 'Plano comercial inválido ou inativo' });
+        planoPatch = {
+          planoComercialId: pc.id,
+          plano: mapearEnumPorMaxColaboradores(pc.maxColaboradores),
+        };
+      }
+    } else if (plano !== undefined) {
+      planoPatch = { plano };
+    }
+
     const tenant = await prisma.$transaction(async (tx) => {
       await tx.tenant.update({
         where: { id },
@@ -216,7 +251,7 @@ async function atualizarTenant(req, res, next) {
           ...(cnpj !== undefined && { cnpj }),
           ...(email !== undefined && { email }),
           ...(telefone !== undefined && { telefone: telefone || null }),
-          ...(plano !== undefined && { plano }),
+          ...planoPatch,
           ...(modoMarcacaoAtualizado !== undefined && { modoMarcacao: modoMarcacaoAtualizado }),
           ...(dadosContrato && dadosContrato),
         },
@@ -238,7 +273,7 @@ async function atualizarTenant(req, res, next) {
         });
       }
 
-      return tx.tenant.findUnique({ where: { id } });
+      return tx.tenant.findUnique({ where: { id }, include: { planoComercial: true } });
     });
 
     tenant.features = await lerFeaturesDoTenant(id);

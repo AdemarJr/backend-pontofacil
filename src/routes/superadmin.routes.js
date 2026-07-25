@@ -14,8 +14,19 @@ const {
   stats,
   limparRegistrosTenant,
 } = require('../controllers/superadmin.controller');
+const { listar, buscarPorId, criar, atualizar, remover } = require('../controllers/plano.controller');
+const {
+  criarCobrancaTenant,
+  listarPagamentosTenant,
+} = require('../controllers/pagamento.controller');
 
 router.use(autenticar, exigirSuperAdmin);
+
+router.get('/plans', listar);
+router.get('/plans/:id', buscarPorId);
+router.post('/plans', criar);
+router.put('/plans/:id', atualizar);
+router.delete('/plans/:id', remover);
 
 router.get('/tenants', listarTenants);
 router.post('/tenants', criarTenant);
@@ -27,6 +38,8 @@ router.put('/tenants/:id/features', atualizarFeatures);
 router.put('/tenants/:id/contrato', atualizarContrato);
 router.put('/tenants/:id/status', atualizarStatus);
 router.post('/tenants/:id/limpar-registros', limparRegistrosTenant);
+router.post('/tenants/:id/cobranca-plano', criarCobrancaTenant);
+router.get('/tenants/:id/pagamentos', listarPagamentosTenant);
 router.get('/stats', stats);
 
 module.exports = router;
