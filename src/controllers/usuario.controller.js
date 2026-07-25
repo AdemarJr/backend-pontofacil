@@ -6,6 +6,7 @@ const { sendConviteUsuario } = require('../services/passwordReset.service');
 
 const prisma = require('../infra/prisma');
 const { validarCpfOuPis } = require('../shared/documentoIdentificacao');
+const { assertPodeAdicionarColaborador } = require('../shared/planLimits');
 
 async function listar(req, res, next) {
   try {
@@ -75,6 +76,13 @@ async function criar(req, res, next) {
       where: { email: emailNorm, tenantId: req.tenantId }
     });
     if (existente) return res.status(409).json({ error: 'Email já cadastrado nesta empresa' });
+
+    try {
+      await assertPodeAdicionarColaborador(req.tenantId, 1);
+    } catch (e) {
+      if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+      throw e;
+    }
 
     const pinHash = await bcrypt.hash(pin, 12);
     const pinEncrypted = encryptPin(pin);
