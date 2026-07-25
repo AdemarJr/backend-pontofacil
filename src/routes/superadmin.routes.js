@@ -19,8 +19,17 @@ const {
   criarCobrancaTenant,
   listarPagamentosTenant,
 } = require('../controllers/pagamento.controller');
+const {
+  obterInfinitipay,
+  salvarInfinitipay,
+  testarInfinitipay,
+} = require('../controllers/integracao.controller');
 
 router.use(autenticar, exigirSuperAdmin);
+
+router.get('/integracoes/infinitipay', obterInfinitipay);
+router.put('/integracoes/infinitipay', salvarInfinitipay);
+router.post('/integracoes/infinitipay/testar', testarInfinitipay);
 
 router.get('/plans', listar);
 router.get('/plans/:id', buscarPorId);

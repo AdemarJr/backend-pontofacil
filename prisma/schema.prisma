@@ -171,6 +171,24 @@ model PagamentoPlano {
   @@map("pagamentos_plano")
 }
 
+/// Configuração global InfinitePay (singleton — editável no Super Admin)
+model IntegracaoInfinitipay {
+  id             String   @id @default("default")
+  ativo          Boolean  @default(false)
+  /// InfiniteTag (sem o símbolo $)
+  handle         String?
+  /// URL pública do backend (para montar webhook)
+  apiPublicUrl   String?
+  /// Sobrescreve webhook padrão (opcional)
+  webhookUrl     String?
+  /// Sobrescreve redirect pós-pagamento (opcional)
+  redirectUrl    String?
+  updatedAt      DateTime @updatedAt
+  updatedByEmail String?
+
+  @@map("integracao_infinitipay")
+}
+
 enum ModoMarcacao {
   QUATRO_BATIDAS
   DUAS_BATIDAS
