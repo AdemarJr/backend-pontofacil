@@ -4,9 +4,8 @@ const { PrismaClient } = require('@prisma/client');
 const { sendMail, isMailConfigured } = require('./mail.service');
 const { decryptPin } = require('../utils/pinCrypto');
 
-const prisma = require('../infra/prisma');
-const { assertSenhaForte } = require('../shared/passwordPolicy');
-const { assertSenhaDiferenteDoPin } = require('../shared/senhaUsuario');
+const { formatMailError } = require('../shared/smtpHints');
+const { assertPoliticaNovaSenha } = require('../shared/senhaUsuario');
 
 function frontendBase() {
   const raw = String(process.env.FRONTEND_URL || '').trim();
@@ -238,8 +237,10 @@ function assertMailOk(r) {
   if (r?.ok) return;
   const err = new Error(
     r?.skipped
-      ? 'Servidor sem SMTP configurado para envio de e-mails. Contate o administrador.'
-      : `Falha ao enviar e-mail. Verifique SMTP (host/porta/secure/usuário/senha) e logs do servidor.`
+      ? (r.reason === 'smtp_sem_senha'
+          ? 'SMTP_PASS não configurado no servidor. Defina a senha do e-mail no Railway.'
+          : 'Servidor sem SMTP configurado para envio de e-mails. Contate o administrador.')
+      : formatMailError(r)
   );
   err.status = r?.skipped ? 503 : 502;
   err.code = r?.skipped ? 'SMTP_NAO_CONFIGURADO' : 'SMTP_FALHA_ENVIO';
@@ -305,16 +306,20 @@ async function resetPasswordWithToken(token, novaSenha) {
     err.status = 400;
     throw err;
   }
-  assertSenhaForte(novaSenha);
 
   const u = await prisma.usuario.findFirst({
     where: {
       passwordResetToken: token,
       passwordResetExpires: { gt: new Date() },
     },
+    select: { id: true, senhaHash: true, pinHash: true },
   });
   if (u) {
-    await assertSenhaDiferenteDoPin(u, novaSenha);
+    await assertPoliticaNovaSenha({
+      novaSenha,
+      senhaHashAtual: u.senhaHash,
+      pinHashAtual: u.pinHash,
+    });
     const senhaHash = await bcrypt.hash(novaSenha, 12);
     await prisma.usuario.update({
       where: { id: u.id },
@@ -332,8 +337,14 @@ async function resetPasswordWithToken(token, novaSenha) {
       passwordResetToken: token,
       passwordResetExpires: { gt: new Date() },
     },
+    select: { id: true, senhaHash: true },
   });
   if (sa) {
+    await assertPoliticaNovaSenha({
+      novaSenha,
+      senhaHashAtual: sa.senhaHash,
+      pinHashAtual: null,
+    });
     const senhaHash = await bcrypt.hash(novaSenha, 12);
     await prisma.superAdmin.update({
       where: { id: sa.id },
@@ -357,7 +368,6 @@ async function changePasswordUsuario(userId, senhaAtual, novaSenha) {
     err.status = 400;
     throw err;
   }
-  assertSenhaForte(novaSenha);
 
   const u = await prisma.usuario.findUnique({
     where: { id: userId },
@@ -383,7 +393,11 @@ async function changePasswordUsuario(userId, senhaAtual, novaSenha) {
     throw err;
   }
 
-  await assertSenhaDiferenteDoPin(u, novaSenha);
+  await assertPoliticaNovaSenha({
+    novaSenha,
+    senhaHashAtual: u.senhaHash,
+    pinHashAtual: u.pinHash,
+  });
 
   const senhaHash = await bcrypt.hash(novaSenha, 12);
   await prisma.usuario.update({

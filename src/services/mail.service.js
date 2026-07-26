@@ -6,10 +6,20 @@ const nodemailer = require('nodemailer');
  */
 function resolveMailFrom() {
   const explicit = process.env.MAIL_FROM;
-  if (explicit && String(explicit).trim()) return String(explicit).trim();
+  if (explicit && String(explicit).trim()) {
+    const v = String(explicit).trim();
+    if (v.includes('<') && v.includes('>')) return v;
+    return `"PontoFácil" <${v}>`;
+  }
   const user = process.env.SMTP_USER;
   if (user && String(user).trim()) return `"PontoFácil" <${String(user).trim()}>`;
   return null;
+}
+
+function readSmtpPass() {
+  const raw = process.env.SMTP_PASS;
+  if (raw == null) return '';
+  return String(raw).trim();
 }
 
 function isMailConfigured() {
@@ -36,11 +46,11 @@ function resolvePortAndSecure() {
 function buildTransportOptions() {
   const { port, secure, requireTLS } = resolvePortAndSecure();
   const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+  const pass = readSmtpPass();
 
   const auth =
     user != null && String(user).trim() !== ''
-      ? { user: String(user).trim(), pass: pass != null ? String(pass) : '' }
+      ? { user: String(user).trim(), pass }
       : undefined;
 
   const rejectUnauthorized =
@@ -49,16 +59,19 @@ function buildTransportOptions() {
       ? false
       : true;
 
+  const useIpv4 = process.env.SMTP_IPV4 !== '0' && process.env.SMTP_IPV4 !== 'false';
+
   const opts = {
     host: process.env.SMTP_HOST,
     port,
     secure,
     ...(requireTLS ? { requireTLS: true } : {}),
     auth,
-    connectionTimeout: parseInt(process.env.SMTP_CONNECTION_TIMEOUT_MS || '10000', 10),
-    greetingTimeout: parseInt(process.env.SMTP_GREETING_TIMEOUT_MS || '10000', 10),
-    socketTimeout: parseInt(process.env.SMTP_SOCKET_TIMEOUT_MS || '25000', 10),
-    tls: { rejectUnauthorized },
+    ...(useIpv4 ? { family: 4 } : {}),
+    connectionTimeout: parseInt(process.env.SMTP_CONNECTION_TIMEOUT_MS || '15000', 10),
+    greetingTimeout: parseInt(process.env.SMTP_GREETING_TIMEOUT_MS || '15000', 10),
+    socketTimeout: parseInt(process.env.SMTP_SOCKET_TIMEOUT_MS || '30000', 10),
+    tls: { rejectUnauthorized, minVersion: 'TLSv1.2' },
   };
 
   if (process.env.SMTP_DEBUG === '1' || process.env.SMTP_DEBUG === 'true') {
@@ -85,14 +98,30 @@ function resetTransporter() {
 }
 
 function logSmtpSendError(e, to) {
+  const passLen = readSmtpPass().length;
   const extra = {
     to,
     code: e?.code,
     command: e?.command,
     responseCode: e?.responseCode,
     response: e?.response,
+    smtpPassLength: passLen,
   };
   console.error('[mail] Falha ao enviar:', e?.message || e, JSON.stringify(extra));
+}
+
+function getSmtpPublicConfig() {
+  const { port, secure } = resolvePortAndSecure();
+  return {
+    host: process.env.SMTP_HOST || null,
+    port,
+    secure,
+    user: process.env.SMTP_USER ? String(process.env.SMTP_USER).trim() : null,
+    from: resolveMailFrom()?.replace(/<[^>]+>/, '<…>') || null,
+    passConfigured: readSmtpPass().length > 0,
+    passLength: readSmtpPass().length,
+    configured: isMailConfigured(),
+  };
 }
 
 /**
@@ -103,14 +132,17 @@ async function verifySmtpConnection() {
   if (!isMailConfigured()) {
     return { ok: false, skipped: true, error: 'SMTP_HOST ou remetente (MAIL_FROM / SMTP_USER) ausente' };
   }
+  if (!readSmtpPass()) {
+    return {
+      ok: false,
+      skipped: true,
+      error: 'SMTP_PASS ausente ou vazio — autenticação obrigatória na Hostinger.',
+      summary: getSmtpPublicConfig(),
+    };
+  }
+  resetTransporter();
   const { port, secure } = resolvePortAndSecure();
-  const summary = {
-    host: process.env.SMTP_HOST,
-    port,
-    secure,
-    hasAuth: Boolean(process.env.SMTP_USER && String(process.env.SMTP_USER).trim()),
-    from: resolveMailFrom()?.replace(/<[^>]+>/, '<…>') || null,
-  };
+  const summary = getSmtpPublicConfig();
 
   const t = getTransporter();
   if (!t) return { ok: false, skipped: true, error: 'Transporter não criado', summary };
@@ -155,6 +187,11 @@ async function sendMail(opts) {
     );
   }
 
+  if (!readSmtpPass()) {
+    console.warn('[mail] SMTP_PASS vazio — autenticação falhará na Hostinger. Destino:', to);
+    return { ok: false, skipped: true, reason: 'smtp_sem_senha' };
+  }
+
   try {
     await t.sendMail({
       from,
@@ -166,11 +203,15 @@ async function sendMail(opts) {
     return { ok: true };
   } catch (e) {
     logSmtpSendError(e, to);
-    if (e?.code === 'ETIMEDOUT' || e?.code === 'ECONNRESET' || e?.code === 'ESOCKET') {
-      resetTransporter();
-    }
+    resetTransporter();
     return { ok: false, skipped: false, reason: 'falha_envio', error: e?.message || String(e) };
   }
 }
 
-module.exports = { sendMail, isMailConfigured, verifySmtpConnection, resetTransporter };
+module.exports = {
+  sendMail,
+  isMailConfigured,
+  verifySmtpConnection,
+  resetTransporter,
+  getSmtpPublicConfig,
+};

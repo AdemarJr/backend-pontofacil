@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 const { encryptPin, decryptPin } = require('../utils/pinCrypto');
 const { sendConviteUsuario, sendResetUsuarioEmail } = require('../services/passwordReset.service');
+const { formatMailError } = require('../shared/smtpHints');
 
 const prisma = require('../infra/prisma');
 const { validarCpfOuPis } = require('../shared/documentoIdentificacao');
@@ -381,8 +382,10 @@ async function reenviarConvite(req, res, next) {
     if (!r?.ok) {
       const err = new Error(
         r?.skipped
-          ? 'Servidor sem SMTP configurado para envio de e-mails.'
-          : 'Falha ao enviar convite por e-mail.'
+          ? (r.reason === 'smtp_sem_senha'
+              ? 'SMTP_PASS não configurado no servidor.'
+              : 'Servidor sem SMTP configurado para envio de e-mails.')
+          : formatMailError(r)
       );
       err.status = r?.skipped ? 503 : 502;
       throw err;
@@ -411,8 +414,10 @@ async function resetSenhaEmail(req, res, next) {
     if (!r?.ok) {
       const err = new Error(
         r?.skipped
-          ? 'Servidor sem SMTP configurado para envio de e-mails.'
-          : 'Falha ao enviar e-mail de redefinição.'
+          ? (r.reason === 'smtp_sem_senha'
+              ? 'SMTP_PASS não configurado no servidor.'
+              : 'Servidor sem SMTP configurado para envio de e-mails.')
+          : formatMailError(r)
       );
       err.status = r?.skipped ? 503 : 502;
       throw err;

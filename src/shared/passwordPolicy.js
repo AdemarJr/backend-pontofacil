@@ -1,6 +1,7 @@
 /**
  * Política de senha web (login painel / meu ponto).
- * Mínimo 8 com complexidade OU 12+ caracteres.
+ * Mínimo 8 com complexidade OU 12+ caracteres — aplicada só em senha NOVA.
+ * Senhas já cadastradas continuam válidas no login até o usuário trocar.
  */
 
 function validarSenhaForte(senha) {
