@@ -1,8 +1,8 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const { PrismaClient } = require('@prisma/client');
 const { sendMail, isMailConfigured } = require('./mail.service');
 const { decryptPin } = require('../utils/pinCrypto');
+const prisma = require('../infra/prisma');
 
 const { formatMailError } = require('../shared/smtpHints');
 const { assertPoliticaNovaSenha } = require('../shared/senhaUsuario');
