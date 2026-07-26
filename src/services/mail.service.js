@@ -1,4 +1,9 @@
 const nodemailer = require('nodemailer');
+const {
+  isBrevoApiConfigured,
+  verifyBrevoApi,
+  sendViaBrevoApi,
+} = require('./brevoMail.service');
 
 /**
  * Endereço "From" — muitos provedores rejeitam se não bater com SMTP_USER.
@@ -16,20 +21,31 @@ function resolveMailFrom() {
   return null;
 }
 
+function getMailProvider() {
+  const raw = String(process.env.MAIL_PROVIDER || '').trim().toLowerCase();
+  if (raw === 'brevo-api' || raw === 'brevo') return 'brevo-api';
+  if (raw === 'smtp') return 'smtp';
+  if (isBrevoApiConfigured()) return 'brevo-api';
+  return 'smtp';
+}
+
 function readSmtpPass() {
   const raw = process.env.SMTP_PASS;
   if (raw == null) return '';
   return String(raw).trim();
 }
 
-function isMailConfigured() {
-  return Boolean(process.env.SMTP_HOST && resolveMailFrom());
+function isSmtpConfigured() {
+  return Boolean(process.env.SMTP_HOST && resolveMailFrom() && readSmtpPass());
 }
 
-/**
- * Porta 465 = SSL direto (secure: true). Porta 587 = STARTTLS (secure: false + requireTLS).
- * Erro comum: porta 465 sem SMTP_SECURE=true — a conexão nunca completa.
- */
+function isMailConfigured() {
+  if (getMailProvider() === 'brevo-api') {
+    return isBrevoApiConfigured() && Boolean(resolveMailFrom());
+  }
+  return isSmtpConfigured();
+}
+
 function resolvePortAndSecure() {
   const port = parseInt(process.env.SMTP_PORT || '587', 10);
   const raw = (process.env.SMTP_SECURE || '').toLowerCase();
@@ -85,65 +101,72 @@ function buildTransportOptions() {
 let transporter;
 
 function getTransporter() {
-  if (!isMailConfigured()) return null;
+  if (!isSmtpConfigured()) return null;
   if (!transporter) {
     transporter = nodemailer.createTransport(buildTransportOptions());
   }
   return transporter;
 }
 
-/** Limpa o transporter (útil após falha de conexão ou mudança de env em runtime). */
 function resetTransporter() {
   transporter = null;
 }
 
 function logSmtpSendError(e, to) {
-  const passLen = readSmtpPass().length;
   const extra = {
     to,
     code: e?.code,
     command: e?.command,
     responseCode: e?.responseCode,
     response: e?.response,
-    smtpPassLength: passLen,
+    smtpPassLength: readSmtpPass().length,
   };
-  console.error('[mail] Falha ao enviar:', e?.message || e, JSON.stringify(extra));
+  console.error('[mail/smtp] Falha ao enviar:', e?.message || e, JSON.stringify(extra));
 }
 
-function getSmtpPublicConfig() {
+function getMailPublicConfig() {
+  const provider = getMailProvider();
+  const from = resolveMailFrom()?.replace(/<[^>]+>/, '<…>') || null;
+
+  if (provider === 'brevo-api') {
+    return {
+      provider: 'brevo-api',
+      configured: isMailConfigured(),
+      from,
+      brevoApiKeyConfigured: isBrevoApiConfigured(),
+    };
+  }
+
   const { port, secure } = resolvePortAndSecure();
   return {
+    provider: 'smtp',
     host: process.env.SMTP_HOST || null,
     port,
     secure,
     user: process.env.SMTP_USER ? String(process.env.SMTP_USER).trim() : null,
-    from: resolveMailFrom()?.replace(/<[^>]+>/, '<…>') || null,
+    from,
     passConfigured: readSmtpPass().length > 0,
     passLength: readSmtpPass().length,
     configured: isMailConfigured(),
   };
 }
 
-/**
- * Testa login + handshake com o servidor SMTP (sem enviar mensagem).
- * @returns {Promise<{ ok: boolean; skipped?: boolean; error?: string; summary?: object }>}
- */
-async function verifySmtpConnection() {
-  if (!isMailConfigured()) {
-    return { ok: false, skipped: true, error: 'SMTP_HOST ou remetente (MAIL_FROM / SMTP_USER) ausente' };
-  }
-  if (!readSmtpPass()) {
-    return {
-      ok: false,
-      skipped: true,
-      error: 'SMTP_PASS ausente ou vazio — autenticação obrigatória na Hostinger.',
-      summary: getSmtpPublicConfig(),
-    };
-  }
-  resetTransporter();
-  const { port, secure } = resolvePortAndSecure();
-  const summary = getSmtpPublicConfig();
+/** @deprecated use getMailPublicConfig */
+function getSmtpPublicConfig() {
+  return getMailPublicConfig();
+}
 
+async function verifySmtpConnection() {
+  if (getMailProvider() === 'brevo-api') {
+    return verifyBrevoApi();
+  }
+
+  if (!isSmtpConfigured()) {
+    return { ok: false, skipped: true, error: 'SMTP_HOST, SMTP_PASS ou remetente (MAIL_FROM) ausente' };
+  }
+
+  resetTransporter();
+  const summary = getMailPublicConfig();
   const t = getTransporter();
   if (!t) return { ok: false, skipped: true, error: 'Transporter não criado', summary };
 
@@ -160,35 +183,21 @@ async function verifySmtpConnection() {
 if (process.env.SMTP_VERIFY_ON_START === '1' || process.env.SMTP_VERIFY_ON_START === 'true') {
   setImmediate(() => {
     verifySmtpConnection().then((r) => {
-      if (r.ok) console.log('[mail] Verificação SMTP ao subir: OK', r.summary);
-      else if (r.skipped) console.warn('[mail] Verificação SMTP ao subir: ignorada (não configurado)');
-      else console.error('[mail] Verificação SMTP ao subir: FALHOU —', r.error, r.summary);
+      if (r.ok) console.log('[mail] Verificação ao subir: OK', r.summary);
+      else if (r.skipped) console.warn('[mail] Verificação ao subir: ignorada (não configurado)');
+      else console.error('[mail] Verificação ao subir: FALHOU —', r.error, r.summary);
     });
   });
 }
 
-/**
- * @param {{ to: string; subject: string; text: string; html?: string }} opts
- * @returns {Promise<{ ok: boolean; skipped?: boolean; reason?: string; error?: string }>}
- */
-async function sendMail(opts) {
+async function sendMailViaSmtp(opts) {
   const { to, subject, text, html } = opts;
   const from = resolveMailFrom();
   const t = getTransporter();
   if (!t || !from) {
-    console.warn('[mail] SMTP não configurado (SMTP_HOST + MAIL_FROM ou SMTP_USER) — e-mail não enviado para', to);
     return { ok: false, skipped: true, reason: 'smtp_nao_configurado' };
   }
-
-  if (!process.env.SMTP_USER || String(process.env.SMTP_USER).trim() === '') {
-    console.warn(
-      '[mail] SMTP_USER vazio — a maioria dos provedores exige autenticação. Destino:',
-      to
-    );
-  }
-
   if (!readSmtpPass()) {
-    console.warn('[mail] SMTP_PASS vazio — autenticação falhará na Hostinger. Destino:', to);
     return { ok: false, skipped: true, reason: 'smtp_sem_senha' };
   }
 
@@ -208,10 +217,29 @@ async function sendMail(opts) {
   }
 }
 
+/**
+ * @param {{ to: string; subject: string; text: string; html?: string }} opts
+ */
+async function sendMail(opts) {
+  const from = resolveMailFrom();
+  if (!from) {
+    console.warn('[mail] MAIL_FROM ausente — e-mail não enviado para', opts.to);
+    return { ok: false, skipped: true, reason: 'mail_from_ausente' };
+  }
+
+  if (getMailProvider() === 'brevo-api') {
+    return sendViaBrevoApi({ ...opts, fromRaw: from });
+  }
+
+  return sendMailViaSmtp(opts);
+}
+
 module.exports = {
   sendMail,
   isMailConfigured,
   verifySmtpConnection,
   resetTransporter,
+  getMailPublicConfig,
   getSmtpPublicConfig,
+  getMailProvider,
 };

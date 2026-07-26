@@ -28,9 +28,18 @@ function dicaParaErroSmtp(errorMsg) {
 function formatMailError(r) {
   if (r?.ok) return null;
   if (r?.skipped) {
-    return 'Servidor sem SMTP configurado (SMTP_HOST + MAIL_FROM ou SMTP_USER).';
+    if (r.reason === 'brevo_api_nao_configurado') {
+      return 'BREVO_API_KEY não configurado. Gere em Brevo → SMTP & API → API Keys.';
+    }
+    if (r.reason === 'mail_from_ausente') {
+      return 'MAIL_FROM não configurado no servidor.';
+    }
+    return 'Servidor sem e-mail configurado (MAIL_FROM + BREVO_API_KEY ou SMTP).';
   }
   const base = r?.error || 'Falha ao enviar e-mail.';
+  if (String(base).toLowerCase().includes('brevo') || String(base).includes('API key')) {
+    return `${base} — Confira BREVO_API_KEY (xkeysib-...) e remetente verificado no Brevo.`;
+  }
   return `${base} — ${dicaParaErroSmtp(r?.error)}`;
 }
 

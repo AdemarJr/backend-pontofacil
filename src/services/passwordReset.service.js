@@ -239,7 +239,11 @@ function assertMailOk(r) {
     r?.skipped
       ? (r.reason === 'smtp_sem_senha'
           ? 'SMTP_PASS não configurado no servidor. Defina a senha do e-mail no Railway.'
-          : 'Servidor sem SMTP configurado para envio de e-mails. Contate o administrador.')
+          : r.reason === 'brevo_api_nao_configurado'
+            ? 'BREVO_API_KEY não configurado. Gere em Brevo → SMTP & API → API Keys.'
+            : r.reason === 'mail_from_ausente'
+              ? 'MAIL_FROM não configurado no servidor.'
+              : 'Servidor sem SMTP configurado para envio de e-mails. Contate o administrador.')
       : formatMailError(r)
   );
   err.status = r?.skipped ? 503 : 502;
