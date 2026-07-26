@@ -1,6 +1,7 @@
 // src/services/s3.service.js
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { validarBufferContraMime } = require('../shared/fileMagic');
 
 const BUCKET = process.env.AWS_BUCKET_NAME || 'pontofacil-fotos';
 
@@ -28,8 +29,11 @@ function getS3Client() {
 const MAX_INLINE_FOTO_BYTES = 5 * 1024 * 1024;
 
 async function uploadFoto(base64String, tenantId, usuarioId) {
-  // Remove prefixo data:image/...;base64,
-  const base64Data = base64String.replace(/^data:image\/\w+;base64,/, '');
+  const formatoDeclarado = String(base64String || '').match(/^data:image\/(\w+);base64,/)?.[1]?.toLowerCase();
+  const mimeMap = { jpeg: 'image/jpeg', jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+  const normalizedMime = mimeMap[formatoDeclarado] || 'image/jpeg';
+
+  const base64Data = String(base64String).replace(/^data:image\/\w+;base64,/, '');
   const buffer = Buffer.from(base64Data, 'base64');
 
   if (buffer.length > MAX_INLINE_FOTO_BYTES) {
@@ -38,16 +42,20 @@ async function uploadFoto(base64String, tenantId, usuarioId) {
     throw err;
   }
 
-  // Sem S3: guarda a imagem no próprio registro (data URL) — adequado para dev; em produção use AWS
+  const magic = validarBufferContraMime(buffer, normalizedMime);
+  if (!magic.ok) {
+    const err = new Error(magic.error);
+    err.status = 400;
+    throw err;
+  }
+
   if (!isS3Configured()) {
     return { key: null, url: base64String };
   }
 
-  // Detecta formato da imagem
-  const formato = base64String.match(/^data:image\/(\w+);base64,/)?.[1] || 'jpeg';
-
+  const formato = magic.ext === 'jpg' ? 'jpeg' : magic.ext;
   const timestamp = Date.now();
-  const key = `fotos/${tenantId}/${usuarioId}/${timestamp}.${formato}`;
+  const key = `fotos/${tenantId}/${usuarioId}/${timestamp}.${magic.ext}`;
 
   const s3 = getS3Client();
   await s3.send(new PutObjectCommand({
@@ -55,17 +63,15 @@ async function uploadFoto(base64String, tenantId, usuarioId) {
     Key: key,
     Body: buffer,
     ContentType: `image/${formato}`,
-    // Metadados para auditoria
     Metadata: {
       tenantId,
       usuarioId,
       timestamp: timestamp.toString(),
     },
-    // Nunca público
     ACL: undefined,
   }));
 
-  return { key, url: null }; // URL sempre gerada via signed URL
+  return { key, url: null };
 }
 
 const MAX_COMPROVANTE_IMAGE = 5 * 1024 * 1024;
@@ -77,10 +83,6 @@ const MIME_COMPROVANTE = {
   'application/pdf': { ext: 'pdf', tipo: 'pdf', max: MAX_COMPROVANTE_PDF },
 };
 
-/**
- * Atestado / comprovante em foto ou PDF (data URL base64).
- * @returns {{ key: string|null, url: string|null, mimeType: string, tipoArquivo: string }}
- */
 async function uploadComprovante(dataUrl, tenantId, usuarioId) {
   const raw = String(dataUrl || '').replace(/\s/g, '');
   const m = /^data:([^;]+);base64,(.+)$/i.exec(raw);
@@ -105,6 +107,13 @@ async function uploadComprovante(dataUrl, tenantId, usuarioId) {
     throw err;
   }
 
+  const magic = validarBufferContraMime(buffer, mime);
+  if (!magic.ok) {
+    const err = new Error(magic.error);
+    err.status = 400;
+    throw err;
+  }
+
   if (!isS3Configured()) {
     return {
       key: null,
@@ -120,7 +129,7 @@ async function uploadComprovante(dataUrl, tenantId, usuarioId) {
   }
 
   const timestamp = Date.now();
-  const key = `comprovantes/${tenantId}/${usuarioId}/${timestamp}.${spec.ext}`;
+  const key = `comprovantes/${tenantId}/${usuarioId}/${timestamp}.${magic.ext}`;
   const s3 = getS3Client();
   await s3.send(
     new PutObjectCommand({
@@ -134,7 +143,6 @@ async function uploadComprovante(dataUrl, tenantId, usuarioId) {
   return { key, url: null, mimeType: mime, tipoArquivo: spec.tipo };
 }
 
-// Gera URL temporária (15 minutos) para exibição segura
 async function gerarUrlAssinada(key, expiracaoSegundos = 900) {
   if (!key) return null;
   try {
