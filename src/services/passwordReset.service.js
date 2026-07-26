@@ -1,10 +1,11 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const { PrismaClient } = require('@prisma/client');
 const { sendMail, isMailConfigured } = require('./mail.service');
 const { decryptPin } = require('../utils/pinCrypto');
-
 const prisma = require('../infra/prisma');
+
+const { formatMailError } = require('../shared/smtpHints');
+const { assertPoliticaNovaSenha } = require('../shared/senhaUsuario');
 
 function frontendBase() {
   const raw = String(process.env.FRONTEND_URL || '').trim();
@@ -236,8 +237,14 @@ function assertMailOk(r) {
   if (r?.ok) return;
   const err = new Error(
     r?.skipped
-      ? 'Servidor sem SMTP configurado para envio de e-mails. Contate o administrador.'
-      : `Falha ao enviar e-mail. Verifique SMTP (host/porta/secure/usuário/senha) e logs do servidor.`
+      ? (r.reason === 'smtp_sem_senha'
+          ? 'SMTP_PASS não configurado no servidor. Defina a senha do e-mail no Railway.'
+          : r.reason === 'brevo_api_nao_configurado'
+            ? 'BREVO_API_KEY não configurado. Gere em Brevo → SMTP & API → API Keys.'
+            : r.reason === 'mail_from_ausente'
+              ? 'MAIL_FROM não configurado no servidor.'
+              : 'Servidor sem SMTP configurado para envio de e-mails. Contate o administrador.')
+      : formatMailError(r)
   );
   err.status = r?.skipped ? 503 : 502;
   err.code = r?.skipped ? 'SMTP_NAO_CONFIGURADO' : 'SMTP_FALHA_ENVIO';
@@ -303,19 +310,20 @@ async function resetPasswordWithToken(token, novaSenha) {
     err.status = 400;
     throw err;
   }
-  if (!novaSenha || String(novaSenha).length < 6) {
-    const err = new Error('Senha deve ter no mínimo 6 caracteres');
-    err.status = 400;
-    throw err;
-  }
 
   const u = await prisma.usuario.findFirst({
     where: {
       passwordResetToken: token,
       passwordResetExpires: { gt: new Date() },
     },
+    select: { id: true, senhaHash: true, pinHash: true },
   });
   if (u) {
+    await assertPoliticaNovaSenha({
+      novaSenha,
+      senhaHashAtual: u.senhaHash,
+      pinHashAtual: u.pinHash,
+    });
     const senhaHash = await bcrypt.hash(novaSenha, 12);
     await prisma.usuario.update({
       where: { id: u.id },
@@ -333,8 +341,14 @@ async function resetPasswordWithToken(token, novaSenha) {
       passwordResetToken: token,
       passwordResetExpires: { gt: new Date() },
     },
+    select: { id: true, senhaHash: true },
   });
   if (sa) {
+    await assertPoliticaNovaSenha({
+      novaSenha,
+      senhaHashAtual: sa.senhaHash,
+      pinHashAtual: null,
+    });
     const senhaHash = await bcrypt.hash(novaSenha, 12);
     await prisma.superAdmin.update({
       where: { id: sa.id },
@@ -352,6 +366,55 @@ async function resetPasswordWithToken(token, novaSenha) {
   throw err;
 }
 
+async function changePasswordUsuario(userId, senhaAtual, novaSenha) {
+  if (!senhaAtual || !novaSenha) {
+    const err = new Error('Senha atual e nova senha são obrigatórias.');
+    err.status = 400;
+    throw err;
+  }
+
+  const u = await prisma.usuario.findUnique({
+    where: { id: userId },
+    select: { id: true, ativo: true, senhaHash: true, pinHash: true },
+  });
+  if (!u || !u.ativo) {
+    const err = new Error('Usuário não encontrado.');
+    err.status = 404;
+    throw err;
+  }
+
+  const hashAtual = u.senhaHash;
+  if (!hashAtual) {
+    const err = new Error('Você ainda não definiu senha web. Use o link enviado por e-mail ou peça ao RH.');
+    err.status = 400;
+    throw err;
+  }
+
+  const senhaOk = await bcrypt.compare(String(senhaAtual), hashAtual);
+  if (!senhaOk) {
+    const err = new Error('Senha atual incorreta.');
+    err.status = 401;
+    throw err;
+  }
+
+  await assertPoliticaNovaSenha({
+    novaSenha,
+    senhaHashAtual: u.senhaHash,
+    pinHashAtual: u.pinHash,
+  });
+
+  const senhaHash = await bcrypt.hash(novaSenha, 12);
+  await prisma.usuario.update({
+    where: { id: u.id },
+    data: {
+      senhaHash,
+      passwordResetToken: null,
+      passwordResetExpires: null,
+    },
+  });
+  return { ok: true };
+}
+
 module.exports = {
   isMailConfigured,
   buildResetLink,
@@ -360,6 +423,7 @@ module.exports = {
   sendResetSuperAdminEmail,
   requestForgotByEmail,
   resetPasswordWithToken,
+  changePasswordUsuario,
   issueUsuarioToken,
   frontendBase,
 };

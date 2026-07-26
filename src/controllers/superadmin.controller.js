@@ -8,6 +8,7 @@ const prisma = require('../infra/prisma');
 const { resolverDadosContrato, diasAteExpiracao } = require('../shared/contractPeriod');
 const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
 const { mapearEnumPorMaxColaboradores } = require('../shared/planLimits');
+const { validarSenhaForte } = require('../shared/passwordPolicy');
 
 const MODOS_MARCACAO_VALIDOS = ['QUATRO_BATIDAS', 'DUAS_BATIDAS'];
 
@@ -88,13 +89,12 @@ async function criarTenant(req, res, next) {
       return res.status(400).json({ error: 'Nome e e-mail do administrador da empresa são obrigatórios' });
     }
     const senhaStr = adminSenha != null ? String(adminSenha) : '';
-    if (senhaStr.length > 0 && senhaStr.length < 6) {
-      return res.status(400).json({
-        error: 'Senha do administrador deve ter no mínimo 6 caracteres, ou deixe em branco para enviar o primeiro acesso por e-mail',
-      });
+    if (senhaStr.length > 0) {
+      const val = validarSenhaForte(senhaStr);
+      if (!val.ok) return res.status(400).json({ error: val.error });
     }
 
-    const comSenha = senhaStr.length >= 6;
+    const comSenha = senhaStr.length > 0;
     let pinHash;
     let senhaHash = null;
     if (comSenha) {
@@ -387,10 +387,9 @@ async function criarAdminTenant(req, res, next) {
       return res.status(400).json({ error: 'Nome e e-mail são obrigatórios' });
     }
     const senhaStr = senha != null ? String(senha) : '';
-    if (senhaStr.length > 0 && senhaStr.length < 6) {
-      return res.status(400).json({
-        error: 'Senha deve ter no mínimo 6 caracteres, ou deixe em branco para enviar o primeiro acesso por e-mail',
-      });
+    if (senhaStr.length > 0) {
+      const val = validarSenhaForte(senhaStr);
+      if (!val.ok) return res.status(400).json({ error: val.error });
     }
 
     const tenant = await prisma.tenant.findUnique({ where: { id: tenantId } });
@@ -406,7 +405,7 @@ async function criarAdminTenant(req, res, next) {
       return res.status(409).json({ error: 'Já existe usuário com este e-mail nesta empresa' });
     }
 
-    const comSenha = senhaStr.length >= 6;
+    const comSenha = senhaStr.length > 0;
     let pinHash;
     let senhaHash = null;
     if (comSenha) {

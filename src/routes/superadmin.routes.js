@@ -24,8 +24,12 @@ const {
   salvarInfinitipay,
   testarInfinitipay,
 } = require('../controllers/integracao.controller');
+const { statusSmtp, testarSmtp } = require('../controllers/smtp.controller');
 
 router.use(autenticar, exigirSuperAdmin);
+
+router.get('/integracoes/smtp', statusSmtp);
+router.post('/integracoes/smtp/testar', testarSmtp);
 
 router.get('/integracoes/infinitipay', obterInfinitipay);
 router.put('/integracoes/infinitipay', salvarInfinitipay);

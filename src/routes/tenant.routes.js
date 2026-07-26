@@ -1,10 +1,21 @@
 // src/routes/tenant.routes.js
 const router = require('express').Router();
+const rateLimit = require('express-rate-limit');
 const { PrismaClient } = require('@prisma/client');
 const { autenticar, exigirAdmin } = require('../middlewares/auth.middleware');
 const prisma = require('../infra/prisma');
 const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
 const { registrarAuditoria, ipHashFromReq } = require('../shared/auditoria.service');
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const tenantInfoLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: { error: 'Muitas consultas. Tente novamente em alguns minutos.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 function isOutdatedSchemaError(err) {
   // Prisma: P2022 = column does not exist
@@ -150,10 +161,15 @@ router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
   }
 });
 
-router.get('/:tenantId/info', async (req, res, next) => {
+router.get('/:tenantId/info', tenantInfoLimiter, async (req, res, next) => {
   try {
+    const { tenantId } = req.params;
+    if (!UUID_RE.test(tenantId)) {
+      return res.status(404).json({ error: 'Empresa não encontrada' });
+    }
+
     const tenant = await prisma.tenant.findUnique({
-      where: { id: req.params.tenantId, status: 'ATIVO' },
+      where: { id: tenantId, status: 'ATIVO' },
       select: {
         id: true,
         nomeFantasia: true,
@@ -161,7 +177,7 @@ router.get('/:tenantId/info', async (req, res, next) => {
         geofenceAtivo: true,
         permitirTotem: true,
         permitirMeuPonto: true,
-      }
+      },
     });
     if (!tenant) return res.status(404).json({ error: 'Empresa não encontrada' });
     res.json(tenant);
