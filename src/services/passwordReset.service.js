@@ -5,6 +5,7 @@ const { sendMail, isMailConfigured } = require('./mail.service');
 const { decryptPin } = require('../utils/pinCrypto');
 
 const prisma = require('../infra/prisma');
+const { assertSenhaForte } = require('../shared/passwordPolicy');
 
 function frontendBase() {
   const raw = String(process.env.FRONTEND_URL || '').trim();
@@ -303,11 +304,7 @@ async function resetPasswordWithToken(token, novaSenha) {
     err.status = 400;
     throw err;
   }
-  if (!novaSenha || String(novaSenha).length < 6) {
-    const err = new Error('Senha deve ter no mínimo 6 caracteres');
-    err.status = 400;
-    throw err;
-  }
+  assertSenhaForte(novaSenha);
 
   const u = await prisma.usuario.findFirst({
     where: {

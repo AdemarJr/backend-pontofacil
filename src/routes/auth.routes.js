@@ -5,6 +5,7 @@ const {
   loginEmail,
   loginPin,
   refreshToken,
+  logout,
   esqueciSenha,
   redefinirSenha,
   enviarConviteGerente,
@@ -35,9 +36,35 @@ const inviteLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-router.post('/login', loginEmail);
-router.post('/login-pin', loginPin);
-router.post('/refresh', refreshToken);
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: 'Muitas tentativas de login. Tente novamente em 15 minutos.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/** Totem: PIN curto — limite agressivo por IP */
+const loginPinLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  message: { error: 'Muitas tentativas de PIN. Aguarde 15 minutos ou fale com o RH.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: { error: 'Muitas renovações de sessão. Tente novamente em instantes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post('/login', loginLimiter, loginEmail);
+router.post('/login-pin', loginPinLimiter, loginPin);
+router.post('/refresh', refreshLimiter, refreshToken);
+router.post('/logout', logout);
 router.post('/forgot-password', forgotLimiter, esqueciSenha);
 router.post('/reset-password', resetLimiter, redefinirSenha);
 router.post('/send-manager-invite', autenticar, exigirAdmin, inviteLimiter, enviarConviteGerente);

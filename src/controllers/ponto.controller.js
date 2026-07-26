@@ -378,24 +378,25 @@ async function registrar(req, res, next) {
     }
 
     let dataHoraRegistro = agora;
-    if (origem === 'APP_INDIVIDUAL' && dataHoraCapturada) {
+    let clientReqIdDb = null;
+    if (origem === 'APP_INDIVIDUAL' && clientRequestId) {
+      const c = String(clientRequestId).trim();
+      if (c.length > 0 && c.length <= 120) clientReqIdDb = c;
+    }
+
+    // Horário do cliente só em sincronização offline (clientRequestId); janela restrita
+    if (origem === 'APP_INDIVIDUAL' && dataHoraCapturada && clientReqIdDb) {
       const d = new Date(dataHoraCapturada);
       if (!Number.isNaN(d.getTime())) {
-        const maxFuturo = new Date(agora.getTime() + 15 * 60 * 1000);
-        const minPassado = new Date(agora.getTime() - 14 * 24 * 60 * 60 * 1000);
-        if (d.getTime() <= maxFuturo.getTime() && d.getTime() >= minPassado.getTime()) {
+        const maxFuturo = new Date(agora.getTime() + 5 * 60 * 1000);
+        const maxPassadoOffline = new Date(agora.getTime() - 72 * 60 * 60 * 1000);
+        if (d.getTime() <= maxFuturo.getTime() && d.getTime() >= maxPassadoOffline.getTime()) {
           dataHoraRegistro = d;
         }
       }
     }
     const refTime = dataHoraRegistro;
     const dataHoraUtc = agora;
-
-    let clientReqIdDb = null;
-    if (origem === 'APP_INDIVIDUAL' && clientRequestId) {
-      const c = String(clientRequestId).trim();
-      if (c.length > 0 && c.length <= 120) clientReqIdDb = c;
-    }
 
     let dentroGeofence = null;
     if (tenant.geofenceAtivo && origem !== 'TOTEM' && !usuarioCompleto?.isentoGeofence) {

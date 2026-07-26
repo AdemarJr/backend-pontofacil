@@ -115,6 +115,47 @@ async function criarCobrancaTenant(req, res, next) {
   }
 }
 
+function pagamentoConfirmadoNaInfinitePay(check) {
+  return check?.paid === true || (check?.success === true && check?.paid === true);
+}
+
+/**
+ * Só marca PAGO após confirmação na API InfinitePay (anti-fraude de webhook).
+ */
+async function verificarEAplicarPagamento(pagamento, webhookPayload = {}) {
+  const check = await consultarPagamento({
+    orderNsu: pagamento.orderNsu,
+    transactionNsu:
+      webhookPayload.transaction_nsu ||
+      webhookPayload.transactionNsu ||
+      pagamento.transactionNsu ||
+      undefined,
+    slug:
+      webhookPayload.invoice_slug ||
+      webhookPayload.slug ||
+      pagamento.invoiceSlug ||
+      undefined,
+  });
+
+  if (!pagamentoConfirmadoNaInfinitePay(check)) {
+    const err = new Error('Pagamento não confirmado pela InfinitePay');
+    err.status = 402;
+    err.code = 'PAGAMENTO_NAO_CONFIRMADO';
+    throw err;
+  }
+
+  await aplicarPagamentoAprovado(pagamento, {
+    ...webhookPayload,
+    transaction_nsu: webhookPayload.transaction_nsu || webhookPayload.transactionNsu || check.transaction_nsu,
+    invoice_slug: webhookPayload.invoice_slug || webhookPayload.slug || check.invoice_slug,
+    paid_amount: check.paid_amount ?? check.amount ?? webhookPayload.paid_amount,
+    capture_method: check.capture_method ?? webhookPayload.capture_method,
+    receipt_url: webhookPayload.receipt_url || check.receipt_url,
+  });
+
+  return check;
+}
+
 async function listarPagamentosTenant(req, res, next) {
   try {
     const { id: tenantId } = req.params;
@@ -148,10 +189,16 @@ async function webhookInfinitipay(req, res) {
       return res.status(200).json({ ok: true, alreadyPaid: true });
     }
 
-    await aplicarPagamentoAprovado(pagamento, body);
+    await verificarEAplicarPagamento(pagamento, body);
     return res.status(200).json({ ok: true });
   } catch (err) {
     console.error('[webhook/infinitipay]', err?.message || err);
+    if (err.code === 'PAGAMENTO_NAO_CONFIRMADO') {
+      return res.status(402).json({ error: err.message, code: err.code });
+    }
+    if (err.code === 'INFINITEPAY_NOT_CONFIGURED') {
+      return res.status(503).json({ error: err.message, code: err.code });
+    }
     return res.status(400).json({ error: 'Falha ao processar webhook' });
   }
 }
@@ -177,26 +224,19 @@ async function confirmarRetornoPagamento(req, res, next) {
     }
 
     try {
-      const check = await consultarPagamento({
-        orderNsu: String(orderNsu),
-        transactionNsu: transactionNsu ? String(transactionNsu) : undefined,
-        slug: slug ? String(slug) : pagamento.invoiceSlug || undefined,
+      await verificarEAplicarPagamento(pagamento, {
+        transaction_nsu: transactionNsu,
+        invoice_slug: slug,
       });
-      if (check?.paid || check?.success === true && check?.paid === true) {
-        await aplicarPagamentoAprovado(pagamento, {
-          transaction_nsu: transactionNsu,
-          invoice_slug: slug,
-          paid_amount: check.paid_amount ?? check.amount,
-          capture_method: check.capture_method,
-        });
-        const atualizado = await prisma.pagamentoPlano.findUnique({
-          where: { orderNsu: String(orderNsu) },
-          include: { planoComercial: true, tenant: { select: { nomeFantasia: true } } },
-        });
-        return res.json({ status: 'PAGO', pagamento: atualizado, tenant: atualizado.tenant });
-      }
-      return res.json({ status: 'PENDENTE', pagamento, check });
+      const atualizado = await prisma.pagamentoPlano.findUnique({
+        where: { orderNsu: String(orderNsu) },
+        include: { planoComercial: true, tenant: { select: { nomeFantasia: true } } },
+      });
+      return res.json({ status: 'PAGO', pagamento: atualizado, tenant: atualizado.tenant });
     } catch (e) {
+      if (e.code === 'PAGAMENTO_NAO_CONFIRMADO') {
+        return res.json({ status: 'PENDENTE', pagamento });
+      }
       if (e.code === 'INFINITEPAY_NOT_CONFIGURED') {
         return res.status(503).json({ error: e.message, code: e.code });
       }

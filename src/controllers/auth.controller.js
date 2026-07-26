@@ -7,6 +7,15 @@ const { requestForgotByEmail, resetPasswordWithToken, sendConviteUsuario } = req
 const prisma = require('../infra/prisma');
 const { isContractExpired, contractExpiredPayload } = require('../shared/contractCheck');
 const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
+const { setRefreshCookie, clearRefreshCookie, readRefreshToken } = require('../shared/authCookies');
+
+function enviarSessaoAutenticada(res, tokens, extra = {}) {
+  setRefreshCookie(res, tokens.refreshToken);
+  return res.json({
+    accessToken: tokens.accessToken,
+    ...extra,
+  });
+}
 
 function handlePrismaAuthError(err, res, next) {
   if (err.code === 'P1001' || err.code === 'P1017') {
@@ -59,9 +68,8 @@ async function loginEmail(req, res, next) {
       if (!valido) return res.status(401).json({ error: 'Credenciais inválidas' });
 
       const tokens = gerarTokens({ id: superAdmin.id, tipo: 'super_admin' });
-      return res.json({
-        ...tokens,
-        usuario: { id: superAdmin.id, nome: superAdmin.nome, email: superAdmin.email, role: 'SUPER_ADMIN' }
+      return enviarSessaoAutenticada(res, tokens, {
+        usuario: { id: superAdmin.id, nome: superAdmin.nome, email: superAdmin.email, role: 'SUPER_ADMIN' },
       });
     }
 
@@ -101,8 +109,7 @@ async function loginEmail(req, res, next) {
 
     const features = await lerFeaturesDoTenant(usuario.tenantId);
     const tokens = gerarTokens({ id: usuario.id, tenantId: usuario.tenantId, role: usuario.role });
-    return res.json({
-      ...tokens,
+    return enviarSessaoAutenticada(res, tokens, {
       usuario: {
         id: usuario.id,
         nome: usuario.nome,
@@ -120,7 +127,10 @@ async function loginEmail(req, res, next) {
 }
 
 // Login do colaborador no TOTEM (por PIN numérico)
+const PIN_LOGIN_MIN_DELAY_MS = 400;
+
 async function loginPin(req, res, next) {
+  const inicio = Date.now();
   try {
     const { pin, tenantId, deviceId } = req.body;
     if (!pin || !tenantId) {
@@ -138,23 +148,26 @@ async function loginPin(req, res, next) {
       return res.status(403).json({ error: 'Registro por totem está desativado para esta empresa' });
     }
 
-    // Busca todos os colaboradores ativos do tenant e compara PIN
+    // Busca colaboradores ativos do tenant e compara PIN (delay mínimo anti-timing)
     const usuarios = await prisma.usuario.findMany({
-      where: { tenantId, ativo: true },
-      select: { id: true, nome: true, pinHash: true, cargo: true, fotoPerfil: true }
+      where: { tenantId, ativo: true, role: 'COLABORADOR' },
+      select: { id: true, nome: true, pinHash: true, cargo: true, fotoPerfil: true },
     });
 
     let usuarioEncontrado = null;
     for (const u of usuarios) {
-      const match = await bcrypt.compare(pin, u.pinHash);
-      if (match) { usuarioEncontrado = u; break; }
+      if (!u.pinHash) continue;
+      const match = await bcrypt.compare(String(pin), u.pinHash);
+      if (match) {
+        usuarioEncontrado = u;
+        break;
+      }
     }
 
     if (!usuarioEncontrado) {
       return res.status(401).json({ error: 'PIN inválido' });
     }
 
-    // Token de curta duração para o totem (apenas registrar ponto)
     assertJwtConfig();
     const totemToken = jwt.sign(
       { id: usuarioEncontrado.id, tenantId, tipo: 'totem' },
@@ -169,25 +182,65 @@ async function loginPin(req, res, next) {
         nome: usuarioEncontrado.nome,
         cargo: usuarioEncontrado.cargo,
         fotoPerfil: usuarioEncontrado.fotoPerfil,
-      }
+      },
     });
   } catch (err) {
     return handlePrismaAuthError(err, res, next);
+  } finally {
+    const restante = PIN_LOGIN_MIN_DELAY_MS - (Date.now() - inicio);
+    if (restante > 0) {
+      await new Promise((resolve) => setTimeout(resolve, restante));
+    }
   }
 }
 
-// Refresh de token
+// Refresh de token — revalida usuário/tenant no banco (anti-sessão zumbi)
 async function refreshToken(req, res, next) {
   try {
-    const { refreshToken } = req.body;
-    if (!refreshToken) return res.status(400).json({ error: 'Refresh token obrigatório' });
+    const tokenBody = readRefreshToken(req);
+    if (!tokenBody) return res.status(401).json({ error: 'Refresh token obrigatório' });
 
-    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
-    const tokens = gerarTokens({ id: decoded.id, tenantId: decoded.tenantId, role: decoded.role, tipo: decoded.tipo });
-    res.json(tokens);
+    const decoded = jwt.verify(tokenBody, process.env.JWT_REFRESH_SECRET);
+
+    if (decoded.tipo === 'super_admin') {
+      const superAdmin = await prisma.superAdmin.findUnique({ where: { id: decoded.id } });
+      if (!superAdmin || !superAdmin.ativo) {
+        return res.status(401).json({ error: 'Acesso negado' });
+      }
+      const tokens = gerarTokens({ id: superAdmin.id, tipo: 'super_admin' });
+      return enviarSessaoAutenticada(res, tokens);
+    }
+
+    const usuario = await prisma.usuario.findUnique({
+      where: { id: decoded.id },
+      include: { tenant: true },
+    });
+
+    if (!usuario || !usuario.ativo) {
+      return res.status(401).json({ error: 'Usuário inativo ou não encontrado' });
+    }
+    if (usuario.tenant.status !== 'ATIVO') {
+      return res.status(403).json({ error: 'Empresa com acesso suspenso' });
+    }
+    if (isContractExpired(usuario.tenant)) {
+      return res.status(403).json(contractExpiredPayload(usuario.tenant));
+    }
+
+    const tokens = gerarTokens({
+      id: usuario.id,
+      tenantId: usuario.tenantId,
+      role: usuario.role,
+    });
+    return enviarSessaoAutenticada(res, tokens);
   } catch (err) {
     return res.status(401).json({ error: 'Refresh token inválido ou expirado' });
   }
+}
+
+/** Encerra sessão — remove cookie HttpOnly do refresh token */
+function logout(req, res) {
+  clearRefreshCookie(res);
+  res.json({ sucesso: true });
 }
 
 /** Esqueci minha senha — envia e-mail com link (não revela se o e-mail existe) */
@@ -275,6 +328,7 @@ module.exports = {
   loginEmail,
   loginPin,
   refreshToken,
+  logout,
   esqueciSenha,
   redefinirSenha,
   enviarConviteGerente,
