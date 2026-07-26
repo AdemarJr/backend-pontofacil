@@ -2,7 +2,7 @@
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 const { encryptPin, decryptPin } = require('../utils/pinCrypto');
-const { sendConviteUsuario } = require('../services/passwordReset.service');
+const { sendConviteUsuario, sendResetUsuarioEmail } = require('../services/passwordReset.service');
 
 const prisma = require('../infra/prisma');
 const { validarCpfOuPis } = require('../shared/documentoIdentificacao');
@@ -15,6 +15,7 @@ async function listar(req, res, next) {
       select: {
         id: true, nome: true, email: true, cargo: true,
         departamento: true, role: true, ativo: true, createdAt: true,
+        senhaHash: true,
         localRegistroId: true,
         isentoGeofence: true,
         dataAdmissao: true,
@@ -33,7 +34,12 @@ async function listar(req, res, next) {
       },
       orderBy: { nome: 'asc' },
     });
-    res.json(usuarios);
+    res.json(
+      usuarios.map(({ senhaHash, ...u }) => ({
+        ...u,
+        senhaWebDefinida: Boolean(senhaHash),
+      }))
+    );
   } catch (err) { next(err); }
 }
 
@@ -363,4 +369,74 @@ async function obterPin(req, res, next) {
   }
 }
 
-module.exports = { listar, buscarPorId, criar, atualizar, remover, excluirDefinitivo, obterPin };
+async function reenviarConvite(req, res, next) {
+  try {
+    const usuario = await prisma.usuario.findFirst({
+      where: { id: req.params.id, tenantId: req.tenantId, ativo: true },
+      select: { id: true, nome: true, email: true },
+    });
+    if (!usuario) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    const r = await sendConviteUsuario(usuario.id);
+    if (!r?.ok) {
+      const err = new Error(
+        r?.skipped
+          ? 'Servidor sem SMTP configurado para envio de e-mails.'
+          : 'Falha ao enviar convite por e-mail.'
+      );
+      err.status = r?.skipped ? 503 : 502;
+      throw err;
+    }
+
+    return res.json({
+      sucesso: true,
+      emailEnviado: true,
+      mensagem: `Convite enviado para ${usuario.email}.`,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+}
+
+async function resetSenhaEmail(req, res, next) {
+  try {
+    const usuario = await prisma.usuario.findFirst({
+      where: { id: req.params.id, tenantId: req.tenantId, ativo: true },
+      include: { tenant: { select: { nomeFantasia: true } } },
+    });
+    if (!usuario) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+    const r = await sendResetUsuarioEmail(usuario);
+    if (!r?.ok) {
+      const err = new Error(
+        r?.skipped
+          ? 'Servidor sem SMTP configurado para envio de e-mails.'
+          : 'Falha ao enviar e-mail de redefinição.'
+      );
+      err.status = r?.skipped ? 503 : 502;
+      throw err;
+    }
+
+    return res.json({
+      sucesso: true,
+      emailEnviado: true,
+      mensagem: `Link de redefinição enviado para ${usuario.email}.`,
+    });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+}
+
+module.exports = {
+  listar,
+  buscarPorId,
+  criar,
+  atualizar,
+  remover,
+  excluirDefinitivo,
+  obterPin,
+  reenviarConvite,
+  resetSenhaEmail,
+};

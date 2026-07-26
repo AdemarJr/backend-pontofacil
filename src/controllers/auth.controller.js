@@ -2,7 +2,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
-const { requestForgotByEmail, resetPasswordWithToken, sendConviteUsuario } = require('../services/passwordReset.service');
+const { requestForgotByEmail, resetPasswordWithToken, sendConviteUsuario, changePasswordUsuario } = require('../services/passwordReset.service');
 
 const prisma = require('../infra/prisma');
 const { isContractExpired, contractExpiredPayload } = require('../shared/contractCheck');
@@ -103,9 +103,18 @@ async function loginEmail(req, res, next) {
       return res.status(403).json(contractExpiredPayload(usuario.tenant));
     }
 
-    const hashLogin = usuario.senhaHash || usuario.pinHash;
-    const valido = await bcrypt.compare(senha, hashLogin);
-    if (!valido) return res.status(401).json({ error: 'Credenciais inválidas' });
+    if (usuario.senhaHash) {
+      const valido = await bcrypt.compare(senha, usuario.senhaHash);
+      if (!valido) return res.status(401).json({ error: 'Credenciais inválidas' });
+    } else {
+      // Primeiro acesso pendente: aceita PIN só até definir senha web pelo convite.
+      const valido = await bcrypt.compare(senha, usuario.pinHash);
+      if (!valido) {
+        return res.status(401).json({
+          error: 'Credenciais inválidas. Se ainda não definiu senha web, use o link enviado por e-mail.',
+        });
+      }
+    }
 
     const features = await lerFeaturesDoTenant(usuario.tenantId);
     const tokens = gerarTokens({ id: usuario.id, tenantId: usuario.tenantId, role: usuario.role });
@@ -283,10 +292,6 @@ async function redefinirSenha(req, res, next) {
   }
 }
 
-/**
- * POST /api/auth/send-manager-invite
- * Envia convite de primeiro acesso por e-mail (SMTP).
- */
 async function enviarConviteGerente(req, res, next) {
   try {
     const { email } = req.body;
@@ -324,6 +329,30 @@ async function enviarConviteGerente(req, res, next) {
   }
 }
 
+/** Colaborador/admin logado: altera senha web (não altera PIN do totem). */
+async function alterarSenha(req, res, next) {
+  try {
+    if (req.isSuperAdmin) {
+      return res.status(403).json({ error: 'Use recuperação de senha no login do Super Admin.' });
+    }
+    const { senhaAtual, novaSenha } = req.body;
+    try {
+      await changePasswordUsuario(req.usuario.id, senhaAtual, novaSenha);
+    } catch (e) {
+      if (e.status) return res.status(e.status).json({ error: e.message });
+      throw e;
+    }
+    clearRefreshCookie(res);
+    res.json({
+      sucesso: true,
+      mensagem: 'Senha atualizada. Entre novamente com a nova senha.',
+      requerLogin: true,
+    });
+  } catch (err) {
+    return handlePrismaAuthError(err, res, next);
+  }
+}
+
 module.exports = {
   loginEmail,
   loginPin,
@@ -332,4 +361,5 @@ module.exports = {
   esqueciSenha,
   redefinirSenha,
   enviarConviteGerente,
+  alterarSenha,
 };

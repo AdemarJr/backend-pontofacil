@@ -6,6 +6,7 @@ const { decryptPin } = require('../utils/pinCrypto');
 
 const prisma = require('../infra/prisma');
 const { assertSenhaForte } = require('../shared/passwordPolicy');
+const { assertSenhaDiferenteDoPin } = require('../shared/senhaUsuario');
 
 function frontendBase() {
   const raw = String(process.env.FRONTEND_URL || '').trim();
@@ -313,6 +314,7 @@ async function resetPasswordWithToken(token, novaSenha) {
     },
   });
   if (u) {
+    await assertSenhaDiferenteDoPin(u, novaSenha);
     const senhaHash = await bcrypt.hash(novaSenha, 12);
     await prisma.usuario.update({
       where: { id: u.id },
@@ -349,6 +351,52 @@ async function resetPasswordWithToken(token, novaSenha) {
   throw err;
 }
 
+async function changePasswordUsuario(userId, senhaAtual, novaSenha) {
+  if (!senhaAtual || !novaSenha) {
+    const err = new Error('Senha atual e nova senha são obrigatórias.');
+    err.status = 400;
+    throw err;
+  }
+  assertSenhaForte(novaSenha);
+
+  const u = await prisma.usuario.findUnique({
+    where: { id: userId },
+    select: { id: true, ativo: true, senhaHash: true, pinHash: true },
+  });
+  if (!u || !u.ativo) {
+    const err = new Error('Usuário não encontrado.');
+    err.status = 404;
+    throw err;
+  }
+
+  const hashAtual = u.senhaHash;
+  if (!hashAtual) {
+    const err = new Error('Você ainda não definiu senha web. Use o link enviado por e-mail ou peça ao RH.');
+    err.status = 400;
+    throw err;
+  }
+
+  const senhaOk = await bcrypt.compare(String(senhaAtual), hashAtual);
+  if (!senhaOk) {
+    const err = new Error('Senha atual incorreta.');
+    err.status = 401;
+    throw err;
+  }
+
+  await assertSenhaDiferenteDoPin(u, novaSenha);
+
+  const senhaHash = await bcrypt.hash(novaSenha, 12);
+  await prisma.usuario.update({
+    where: { id: u.id },
+    data: {
+      senhaHash,
+      passwordResetToken: null,
+      passwordResetExpires: null,
+    },
+  });
+  return { ok: true };
+}
+
 module.exports = {
   isMailConfigured,
   buildResetLink,
@@ -357,6 +405,7 @@ module.exports = {
   sendResetSuperAdminEmail,
   requestForgotByEmail,
   resetPasswordWithToken,
+  changePasswordUsuario,
   issueUsuarioToken,
   frontendBase,
 };

@@ -9,6 +9,7 @@ const {
   esqueciSenha,
   redefinirSenha,
   enviarConviteGerente,
+  alterarSenha,
 } = require('../controllers/auth.controller');
 const { autenticar, exigirAdmin } = require('../middlewares/auth.middleware');
 
@@ -61,12 +62,21 @@ const refreshLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const changePasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: 'Muitas tentativas de alteração de senha. Aguarde 15 minutos.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 router.post('/login', loginLimiter, loginEmail);
 router.post('/login-pin', loginPinLimiter, loginPin);
 router.post('/refresh', refreshLimiter, refreshToken);
 router.post('/logout', logout);
 router.post('/forgot-password', forgotLimiter, esqueciSenha);
 router.post('/reset-password', resetLimiter, redefinirSenha);
+router.post('/change-password', autenticar, changePasswordLimiter, alterarSenha);
 router.post('/send-manager-invite', autenticar, exigirAdmin, inviteLimiter, enviarConviteGerente);
 
 module.exports = router;
