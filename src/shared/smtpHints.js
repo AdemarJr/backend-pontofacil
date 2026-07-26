@@ -37,7 +37,20 @@ function formatMailError(r) {
     return 'Servidor sem e-mail configurado (MAIL_FROM + BREVO_API_KEY ou SMTP).';
   }
   const base = r?.error || 'Falha ao enviar e-mail.';
-  if (String(base).toLowerCase().includes('brevo') || String(base).includes('API key')) {
+  const baseLower = String(base).toLowerCase();
+  if (
+    baseLower.includes('unrecognised ip') ||
+    baseLower.includes('unrecognized ip') ||
+    baseLower.includes('authorised_ips') ||
+    baseLower.includes('authorized_ips') ||
+    baseLower.includes('ip not authorized')
+  ) {
+    return (
+      `${base} — No Brevo: Settings → Security → Authorized IPs. ` +
+      'Adicione o IP do Railway ou desative "Block unknown IP addresses" para API (IPs do Railway mudam no plano Hobby).'
+    );
+  }
+  if (baseLower.includes('brevo') || String(base).includes('API key')) {
     return `${base} — Confira BREVO_API_KEY (xkeysib-...) e remetente verificado no Brevo.`;
   }
   return `${base} — ${dicaParaErroSmtp(r?.error)}`;
