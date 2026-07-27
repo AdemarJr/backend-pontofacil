@@ -17,6 +17,7 @@ const {
 const prisma = require('../infra/prisma');
 const { montarPorUsuarioEspelho, montarEspelhoMensal } = require('../modules/relatorios/espelho.service');
 const { criarRegistroPonto } = require('../modules/ponto/registroPonto.service');
+const { buscarDuplicataDia, payloadDuplicataDia } = require('../modules/ponto/registroDuplicataDia');
 const { registrarAuditoria, ipHashFromReq } = require('../shared/auditoria.service');
 const { gerarPreAfdTxt } = require('../modules/fiscal/afdExport.service');
 const { gerarAejCsv } = require('../modules/fiscal/aejExport.service');
@@ -1177,20 +1178,14 @@ async function inserirPontoManual(req, res, next) {
     const dh = parseDataHoraGerenteInput(dataHora);
     if (!dh) return res.status(400).json({ error: 'dataHora inválida' });
 
-    // Um tipo por dia (mesma regra do registro automático, mas aplicado no dia informado)
-    const inicio = new Date(dh.getFullYear(), dh.getMonth(), dh.getDate(), 0, 0, 0, 0);
-    const fim = new Date(dh.getFullYear(), dh.getMonth(), dh.getDate(), 23, 59, 59, 999);
-    const jaExiste = await prisma.registroPonto.findFirst({
-      where: { tenantId, usuarioId, tipo: String(tipo).toUpperCase(), dataHora: { gte: inicio, lte: fim } },
-      select: { id: true, dataHora: true },
+    const conflito = await buscarDuplicataDia(prisma, {
+      tenantId,
+      usuarioId,
+      tipo: String(tipo).toUpperCase(),
+      dataReferencia: dh,
     });
-    if (jaExiste) {
-      return res.status(409).json({
-        error: 'Já existe uma marcação deste tipo para este colaborador neste dia.',
-        code: 'DUPLICADO_DIA',
-        registroId: jaExiste.id,
-        dataHora: jaExiste.dataHora,
-      });
+    if (conflito) {
+      return res.status(409).json(payloadDuplicataDia(conflito));
     }
 
     const registro = await criarRegistroPonto({
@@ -1296,26 +1291,19 @@ async function decidirSolicitacaoAjuste(req, res, next) {
       return res.status(400).json({ error: 'Informe dataHoraEfetiva (ou o colaborador precisa sugerir um horário)' });
     }
 
-    // regra: um tipo por dia (considera dia da dataHoraEfetiva)
-    const inicio = new Date(dh.getFullYear(), dh.getMonth(), dh.getDate(), 0, 0, 0, 0);
-    const fim = new Date(dh.getFullYear(), dh.getMonth(), dh.getDate(), 23, 59, 59, 999);
-    const jaExiste = await prisma.registroPonto.findFirst({
-      where: {
-        tenantId,
-        usuarioId: sol.usuarioId,
-        tipo: sol.tipo,
-        deletedAt: null,
-        dataHora: { gte: inicio, lte: fim },
-      },
-      select: { id: true, dataHora: true },
+    const conflito = await buscarDuplicataDia(prisma, {
+      tenantId,
+      usuarioId: sol.usuarioId,
+      tipo: sol.tipo,
+      dataReferencia: dh,
     });
-    if (jaExiste) {
-      return res.status(409).json({
-        error: 'Já existe uma batida desse tipo nesse dia. Use Ajustar em vez de Aprovar esta solicitação.',
-        code: 'DUPLICADO_DIA',
-        registroId: jaExiste.id,
-        dataHora: jaExiste.dataHora,
-      });
+    if (conflito) {
+      return res.status(409).json(
+        payloadDuplicataDia(
+          conflito,
+          'Já existe uma batida desse tipo neste dia (horário efetivo). Use Ajustar em vez de aprovar esta solicitação.'
+        )
+      );
     }
 
     const motivoBase = `[Solicitação colaborador] ${sol.justificativa}`;
