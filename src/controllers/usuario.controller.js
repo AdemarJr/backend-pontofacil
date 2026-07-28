@@ -32,6 +32,10 @@ async function listar(req, res, next) {
         contaAgencia: true,
         contaNumero: true,
         contaTipo: true,
+        usaVt: true,
+        valorVtMensal: true,
+        descontoVaMensal: true,
+        descontoPlanoSaudeMensal: true,
       },
       orderBy: { nome: 'asc' },
     });
@@ -68,6 +72,7 @@ async function criar(req, res, next) {
       enviarConviteEmail, dataAdmissao, dataDemissao,
       cpf, pis, matricula, tipoContrato, salarioBase, categoriaProfissional,
       dependentesIrrf, contaBanco, contaAgencia, contaNumero, contaTipo,
+      usaVt, valorVtMensal, descontoVaMensal, descontoPlanoSaudeMensal,
     } = req.body;
 
     if (!nome || !email || !pin) {
@@ -142,6 +147,10 @@ async function criar(req, res, next) {
         contaAgencia: contaAgencia || null,
         contaNumero: contaNumero || null,
         contaTipo: contaTipo || null,
+        usaVt: Boolean(usaVt),
+        valorVtMensal: valorVtMensal != null && valorVtMensal !== '' ? Number(valorVtMensal) : null,
+        descontoVaMensal: descontoVaMensal != null && descontoVaMensal !== '' ? Number(descontoVaMensal) : null,
+        descontoPlanoSaudeMensal: descontoPlanoSaudeMensal != null && descontoPlanoSaudeMensal !== '' ? Number(descontoPlanoSaudeMensal) : null,
       },
       select: { id: true, nome: true, email: true, cargo: true, role: true, createdAt: true }
     });
@@ -187,6 +196,7 @@ async function atualizar(req, res, next) {
       dataAdmissao, dataDemissao,
       cpf, pis, matricula, tipoContrato, salarioBase, categoriaProfissional,
       dependentesIrrf, contaBanco, contaAgencia, contaNumero, contaTipo,
+      usaVt, valorVtMensal, descontoVaMensal, descontoPlanoSaudeMensal,
     } = req.body;
 
     const dados = {
@@ -277,6 +287,16 @@ async function atualizar(req, res, next) {
     if (contaAgencia !== undefined) dados.contaAgencia = contaAgencia || null;
     if (contaNumero !== undefined) dados.contaNumero = contaNumero || null;
     if (contaTipo !== undefined) dados.contaTipo = contaTipo || null;
+    if (usaVt !== undefined) dados.usaVt = Boolean(usaVt);
+    if (valorVtMensal !== undefined) {
+      dados.valorVtMensal = valorVtMensal == null || valorVtMensal === '' ? null : Number(valorVtMensal);
+    }
+    if (descontoVaMensal !== undefined) {
+      dados.descontoVaMensal = descontoVaMensal == null || descontoVaMensal === '' ? null : Number(descontoVaMensal);
+    }
+    if (descontoPlanoSaudeMensal !== undefined) {
+      dados.descontoPlanoSaudeMensal = descontoPlanoSaudeMensal == null || descontoPlanoSaudeMensal === '' ? null : Number(descontoPlanoSaudeMensal);
+    }
 
     if (pin) {
       if (pin.length < 4 || !/^\d+$/.test(pin)) {

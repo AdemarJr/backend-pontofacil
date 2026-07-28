@@ -248,6 +248,8 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         emAberto: 0,
         futuros: 0,
         domingosEFeriados: 0,
+        diasAtraso: 0,
+        diasIntervaloInsuficiente: 0,
       },
     };
   }
@@ -353,6 +355,15 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       minutosNoturnos += calcularMinutosNoturnos(pontos);
 
       if (diaExigeJornada) resumo.diasUteis += 1;
+      if (diaExigeJornada && temAlgumPonto && flags.entradaAtrasada) {
+        resumo.diasAtraso += 1;
+      }
+      if (
+        diaExigeJornada &&
+        (flags.intervaloInsuficiente || flags.intervaloObrigatorioAusente)
+      ) {
+        resumo.diasIntervaloInsuficiente += 1;
+      }
       switch (statusDia) {
         case STATUS_DIA.TRABALHADO: resumo.trabalhados += 1; break;
         case STATUS_DIA.PARCIAL: resumo.parciais += 1; break;
