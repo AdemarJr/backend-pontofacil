@@ -68,6 +68,9 @@ model Tenant {
   features       TenantFeature?
   folhaConfig    FolhaConfig?
   folhaRuns      FolhaRun[]
+  feriasPagamentos FeriasPagamento[]
+  decimoTerceiroRuns DecimoTerceiroRun[]
+  rescisoes      Rescisao[]
 
   usuarios       Usuario[]
   registros      RegistroPonto[]
@@ -244,6 +247,12 @@ model Usuario {
   contaNumero          String?
   contaTipo            TipoContaBancaria?
 
+  /// Benefícios (descontos em folha)
+  usaVt                     Boolean  @default(false)
+  valorVtMensal             Decimal? @db.Decimal(12, 2)
+  descontoVaMensal          Decimal? @db.Decimal(12, 2)
+  descontoPlanoSaudeMensal  Decimal? @db.Decimal(12, 2)
+
   /// LGPD / Portaria 671: consentimento para geolocalização e foto
   consentimentoDadosEm      DateTime?
   consentimentoDadosVersao  String?
@@ -253,6 +262,9 @@ model Usuario {
 
   holerites   Holerite[]
   folhaRunsFechados FolhaRun[] @relation("FolhaRunFechadaPor")
+  feriasPagamentos FeriasPagamento[]
+  decimoTerceiroHolerites DecimoTerceiroHolerite[]
+  rescisoes   Rescisao[]
 
   registros   RegistroPonto[]
   escalas     Escala[]
@@ -324,6 +336,18 @@ model FolhaConfig {
   toleranciaAtrasoMin       Int?
   pagarDSR                  Boolean        @default(true)
   permitirFolhaSemAssinatura Boolean       @default(false)
+  /// VT: teto legal de desconto (% do salário, máx. 6 CLT)
+  vtPercentMax              Int            @default(6)
+  /// Reduz desconto VT proporcionalmente às faltas no mês
+  vtProporcionalFaltas      Boolean        @default(true)
+  /// Desconta atrasos na folha (usa diasAtraso do espelho)
+  descontarAtrasos          Boolean        @default(false)
+  /// % do valor de 1 dia de salário por dia com atraso (ex.: 25 = ¼ dia)
+  descontoAtrasoDiarioPercent Int          @default(25)
+  /// Desconta dias com intervalo de almoço insuficiente
+  descontarIntervaloInsuficiente Boolean     @default(false)
+  /// % de 1 dia de salário por dia com intervalo insuficiente
+  descontoIntervaloDiarioPercent Int        @default(25)
   tabelasVersao             String?
   tabelasSnapshot           Json?
   /// Dados bancários da empresa (CNAB)
@@ -682,6 +706,8 @@ model Ferias {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  pagamento FeriasPagamento?
+
   @@index([tenantId, usuarioId])
   @@index([tenantId, dataInicio, dataFim])
   @@map("ferias")
@@ -692,6 +718,104 @@ enum StatusFerias {
   APROVADA
   REJEITADA
   CANCELADA
+}
+
+enum TipoRescisao {
+  SEM_JUSTA_CAUSA
+  PEDIDO_DEMISSAO
+  ACORDO
+  JUSTA_CAUSA
+}
+
+// ---- PAGAMENTO DE FÉRIAS (financeiro) ----
+model FeriasPagamento {
+  id                    String         @id @default(uuid())
+  tenantId              String
+  tenant                Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usuarioId             String
+  usuario               Usuario        @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  feriasId              String?        @unique
+  ferias                Ferias?        @relation(fields: [feriasId], references: [id], onDelete: SetNull)
+  diasFerias            Int
+  diasAbono             Int            @default(0)
+  adiantamentoUmTerco   Boolean        @default(true)
+  dataInicio            String
+  dataFim               String
+  mesReferencia         Int
+  anoReferencia         Int
+  proventos             Json
+  descontos             Json
+  bases                 Json
+  liquido               Decimal        @db.Decimal(12, 2)
+  status                StatusFolhaRun @default(CALCULADA)
+  calculadaEm           DateTime       @default(now())
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  @@index([tenantId, usuarioId])
+  @@index([tenantId, anoReferencia, mesReferencia])
+  @@map("ferias_pagamentos")
+}
+
+// ---- 13º SALÁRIO ----
+model DecimoTerceiroRun {
+  id          String         @id @default(uuid())
+  tenantId    String
+  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ano         Int
+  parcela     Int
+  status      StatusFolhaRun @default(CALCULADA)
+  calculadaEm DateTime?
+  holerites   DecimoTerceiroHolerite[]
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@unique([tenantId, ano, parcela])
+  @@map("decimo_terceiro_runs")
+}
+
+model DecimoTerceiroHolerite {
+  id               String            @id @default(uuid())
+  runId            String
+  run              DecimoTerceiroRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  usuarioId        String
+  usuario          Usuario           @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  mesesTrabalhados Int
+  proventos        Json
+  descontos        Json
+  bases            Json
+  liquido          Decimal           @db.Decimal(12, 2)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@unique([runId, usuarioId])
+  @@map("decimo_terceiro_holerites")
+}
+
+// ---- RESCISÃO ----
+model Rescisao {
+  id                    String         @id @default(uuid())
+  tenantId              String
+  tenant                Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  usuarioId             String
+  usuario               Usuario        @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  tipo                  TipoRescisao
+  dataDesligamento      DateTime
+  avisoPrevioIndenizado Boolean        @default(false)
+  diasAvisoPrevio       Int            @default(0)
+  proventos             Json
+  descontos             Json
+  bases                 Json
+  liquido               Decimal        @db.Decimal(12, 2)
+  multaFgtsEstimada     Decimal?       @db.Decimal(12, 2)
+  observacoes           String?
+  status                StatusFolhaRun @default(CALCULADA)
+  calculadaEm           DateTime       @default(now())
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  @@index([tenantId, usuarioId])
+  @@map("rescisoes")
 }
 
 // ---- SUPER ADMIN (separado dos tenants) ----

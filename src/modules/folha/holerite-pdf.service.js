@@ -5,7 +5,7 @@ function fmtBRL(v) {
   return Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
-function gerarHoleritePdf({ tenant, usuario, holerite, periodo }) {
+function gerarHoleritePdf({ tenant, usuario, holerite, periodo, titulo = 'RECIBO DE PAGAMENTO', subtitulo }) {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: 'A4', margin: 40 });
     const chunks = [];
@@ -16,8 +16,10 @@ function gerarHoleritePdf({ tenant, usuario, holerite, periodo }) {
     doc.fontSize(14).text(tenant.razaoSocial || tenant.nomeFantasia, { align: 'center' });
     doc.fontSize(10).text(`CNPJ: ${tenant.cnpj}`, { align: 'center' });
     doc.moveDown();
-    doc.fontSize(12).text('RECIBO DE PAGAMENTO', { align: 'center', underline: true });
-    doc.fontSize(10).text(`Competência: ${String(periodo.mes).padStart(2, '0')}/${periodo.ano}`, { align: 'center' });
+    doc.fontSize(12).text(titulo, { align: 'center', underline: true });
+    const comp = subtitulo
+      || (periodo?.mes ? `Competência: ${String(periodo.mes).padStart(2, '0')}/${periodo.ano}` : null);
+    if (comp) doc.fontSize(10).text(comp, { align: 'center' });
     doc.moveDown();
 
     doc.text(`Colaborador: ${usuario.nome}`);
@@ -49,6 +51,10 @@ function gerarHoleritePdf({ tenant, usuario, holerite, periodo }) {
     doc.moveDown();
 
     doc.fontSize(12).text(`VALOR LÍQUIDO: ${fmtBRL(holerite.liquido)}`, { align: 'right' });
+    if (holerite.multaFgtsEstimada != null && Number(holerite.multaFgtsEstimada) > 0) {
+      doc.moveDown(0.5);
+      doc.fontSize(9).text(`Multa FGTS estimada (40%/20%): ${fmtBRL(holerite.multaFgtsEstimada)}`, { align: 'right' });
+    }
     doc.moveDown(2);
     doc.fontSize(8).fillColor('#666').text(
       'Documento gerado pelo PontoFácil. Conferência pelo RH/contador é recomendada.',

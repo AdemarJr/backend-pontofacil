@@ -9,6 +9,12 @@ const DEFAULT_CONFIG = {
   adicionalNoturnoPercent: 20,
   pagarDSR: true,
   permitirFolhaSemAssinatura: false,
+  vtPercentMax: 6,
+  vtProporcionalFaltas: true,
+  descontarAtrasos: false,
+  descontoAtrasoDiarioPercent: 25,
+  descontarIntervaloInsuficiente: false,
+  descontoIntervaloDiarioPercent: 25,
   tabelasVersao: tabelas2025.versao,
   tabelasSnapshot: tabelas2025,
 };
@@ -164,6 +170,150 @@ async function listColaboradoresCLT(tenantId) {
       tipoContrato: true, dependentesIrrf: true,
       dataAdmissao: true, dataDemissao: true,
       contaBanco: true, contaAgencia: true, contaNumero: true, contaTipo: true,
+      usaVt: true, valorVtMensal: true,
+      descontoVaMensal: true, descontoPlanoSaudeMensal: true,
+    },
+  });
+}
+
+async function findUsuarioCLT(tenantId, usuarioId) {
+  return prisma.usuario.findFirst({
+    where: { id: usuarioId, tenantId, role: 'COLABORADOR', tipoContrato: 'CLT' },
+    select: {
+      id: true, nome: true, cargo: true, cpf: true, salarioBase: true,
+      tipoContrato: true, dependentesIrrf: true,
+      dataAdmissao: true, dataDemissao: true,
+    },
+  });
+}
+
+async function createFeriasPagamento(tenantId, data) {
+  return prisma.feriasPagamento.create({
+    data: { tenantId, ...data },
+    include: {
+      usuario: { select: { id: true, nome: true, cpf: true, cargo: true } },
+      ferias: { select: { id: true, dataInicio: true, dataFim: true, status: true } },
+    },
+  });
+}
+
+async function listFeriasPagamentos(tenantId, { usuarioId, ano } = {}) {
+  return prisma.feriasPagamento.findMany({
+    where: {
+      tenantId,
+      ...(usuarioId && { usuarioId }),
+      ...(ano && { anoReferencia: Number(ano) }),
+    },
+    include: {
+      usuario: { select: { id: true, nome: true, cpf: true, cargo: true } },
+      ferias: { select: { id: true, dataInicio: true, dataFim: true } },
+    },
+    orderBy: [{ anoReferencia: 'desc' }, { mesReferencia: 'desc' }, { calculadaEm: 'desc' }],
+  });
+}
+
+async function findFeriasPagamento(tenantId, id) {
+  return prisma.feriasPagamento.findFirst({
+    where: { id, tenantId },
+    include: {
+      usuario: true,
+      ferias: true,
+      tenant: { select: { razaoSocial: true, nomeFantasia: true, cnpj: true } },
+    },
+  });
+}
+
+async function upsertDecimoRun(tenantId, ano, parcela, holerites) {
+  return prisma.$transaction(async (tx) => {
+    const run = await tx.decimoTerceiroRun.upsert({
+      where: { tenantId_ano_parcela: { tenantId, ano, parcela } },
+      create: { tenantId, ano, parcela, status: 'CALCULADA', calculadaEm: new Date() },
+      update: { status: 'CALCULADA', calculadaEm: new Date() },
+    });
+
+    await tx.decimoTerceiroHolerite.deleteMany({ where: { runId: run.id } });
+
+    if (holerites?.length) {
+      await tx.decimoTerceiroHolerite.createMany({
+        data: holerites.map((h) => ({
+          runId: run.id,
+          usuarioId: h.usuarioId,
+          mesesTrabalhados: h.mesesTrabalhados,
+          proventos: h.proventos,
+          descontos: h.descontos,
+          bases: h.bases,
+          liquido: h.liquido,
+        })),
+      });
+    }
+
+    return tx.decimoTerceiroRun.findUnique({
+      where: { id: run.id },
+      include: {
+        holerites: {
+          include: { usuario: { select: { id: true, nome: true, cpf: true, cargo: true } } },
+          orderBy: { usuario: { nome: 'asc' } },
+        },
+      },
+    });
+  });
+}
+
+async function listDecimoRuns(tenantId, { ano } = {}) {
+  return prisma.decimoTerceiroRun.findMany({
+    where: { tenantId, ...(ano && { ano: Number(ano) }) },
+    include: { _count: { select: { holerites: true } } },
+    orderBy: [{ ano: 'desc' }, { parcela: 'asc' }],
+  });
+}
+
+async function findDecimoRunById(tenantId, runId) {
+  return prisma.decimoTerceiroRun.findFirst({
+    where: { id: runId, tenantId },
+    include: {
+      holerites: {
+        include: { usuario: { select: { id: true, nome: true, cpf: true, cargo: true } } },
+        orderBy: { usuario: { nome: 'asc' } },
+      },
+    },
+  });
+}
+
+async function findDecimoHolerite(tenantId, holeriteId) {
+  return prisma.decimoTerceiroHolerite.findFirst({
+    where: { id: holeriteId, run: { tenantId } },
+    include: {
+      usuario: true,
+      run: { include: { tenant: { select: { razaoSocial: true, nomeFantasia: true, cnpj: true } } } },
+    },
+  });
+}
+
+async function createRescisao(tenantId, data) {
+  return prisma.rescisao.create({
+    data: { tenantId, ...data },
+    include: {
+      usuario: { select: { id: true, nome: true, cpf: true, cargo: true } },
+    },
+  });
+}
+
+async function listRescisoes(tenantId, { usuarioId } = {}) {
+  return prisma.rescisao.findMany({
+    where: { tenantId, ...(usuarioId && { usuarioId }) },
+    include: {
+      usuario: { select: { id: true, nome: true, cpf: true, cargo: true } },
+    },
+    orderBy: { dataDesligamento: 'desc' },
+  });
+}
+
+async function findRescisao(tenantId, id) {
+  return prisma.rescisao.findFirst({
+    where: { id, tenantId },
+    include: {
+      usuario: true,
+      tenant: { select: { razaoSocial: true, nomeFantasia: true, cnpj: true } },
     },
   });
 }
@@ -178,4 +328,15 @@ module.exports = {
   fecharRun,
   findHolerite,
   listColaboradoresCLT,
+  findUsuarioCLT,
+  createFeriasPagamento,
+  listFeriasPagamentos,
+  findFeriasPagamento,
+  upsertDecimoRun,
+  listDecimoRuns,
+  findDecimoRunById,
+  findDecimoHolerite,
+  createRescisao,
+  listRescisoes,
+  findRescisao,
 };
