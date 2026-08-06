@@ -26,9 +26,13 @@ function handlePrismaAuthError(err, res, next) {
   }
   if (typeof err.code === 'string' && err.code.startsWith('P')) {
     console.error('[auth] Prisma:', err.code, err.message);
+    const schemaOutdated = err.code === 'P2021' || err.code === 'P2022' || /does not exist/i.test(String(err.message || ''));
     return res.status(500).json({
-      error:
-        'Erro ao acessar o banco. Rode `npx prisma migrate deploy` e, se necessário, `node prisma/seed.js` no ambiente com DATABASE_URL.',
+      error: schemaOutdated
+        ? 'Banco desatualizado para este backend. Rode o SQL baseline-completo-homolog.sql no Postgres e redeploy.'
+        : 'Erro ao acessar o banco. Verifique DATABASE_URL no Railway e se o schema está alinhado (prisma migrate deploy).',
+      code: schemaOutdated ? 'DB_SCHEMA_OUTDATED' : 'DB_ERROR',
+      ...(process.env.NODE_ENV !== 'production' && { prismaCode: err.code, detail: err.message }),
     });
   }
   return next(err);

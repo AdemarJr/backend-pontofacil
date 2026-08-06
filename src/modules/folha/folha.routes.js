@@ -26,6 +26,11 @@ router.get('/decimo/runs', ctrl.listarDecimoRuns);
 router.get('/decimo/runs/:id', ctrl.obterDecimoRun);
 router.get('/decimo/holerites/:id/pdf', ctrl.downloadDecimoHoleritePdf);
 
+router.post('/adiantamento/calcular', ctrl.calcularAdiantamento);
+router.get('/adiantamento/runs', ctrl.listarAdiantamentoRuns);
+router.get('/adiantamento/runs/:id', ctrl.obterAdiantamentoRun);
+router.get('/adiantamento/holerites/:id/pdf', ctrl.downloadAdiantamentoHoleritePdf);
+
 router.post('/rescisao/calcular', ctrl.calcularRescisaoEndpoint);
 router.get('/rescisao', ctrl.listarRescisoes);
 router.get('/rescisao/:id/pdf', ctrl.downloadRescisaoPdf);

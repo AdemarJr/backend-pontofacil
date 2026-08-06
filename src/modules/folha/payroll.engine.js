@@ -70,7 +70,7 @@ const PENDENCIA_LABEL = {
  * @param {object} espelhoItem item do espelho por colaborador
  * @param {object} usuario dados do colaborador
  */
-function calcularHolerite(config, espelhoItem, usuario) {
+function calcularHolerite(config, espelhoItem, usuario, opcoes = {}) {
   const tabelas = getTabelas(config);
   const salario = toNumber(usuario.salarioBase);
   const mes = espelhoItem.periodoMes;
@@ -159,6 +159,15 @@ function calcularHolerite(config, espelhoItem, usuario) {
     descontosPreInss,
     descontosPosInss: [],
   });
+
+  const valorAdiantamento = toNumber(opcoes.valorAdiantamento);
+  if (
+    config.descontarAdiantamentoNaFolha !== false
+    && valorAdiantamento > 0
+  ) {
+    // Pós-INSS: adiantamento não reduz base de INSS/IRRF (tributação na folha mensal)
+    descontosPosInss.push(rubrica('206', 'Desconto adiantamento salarial', '', valorAdiantamento));
+  }
 
   const totalProventos = proventos.reduce((s, p) => s + p.valor, 0);
   const totalPreInss = preComPonto.reduce((s, d) => s + d.valor, 0);

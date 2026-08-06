@@ -4,6 +4,7 @@ const { montarEspelhoMensal } = require('../relatorios/espelho.service');
 const { calcularHolerite, validarPendencias } = require('./payroll.engine');
 const { calcularPagamentoFerias } = require('./payroll.feriasPagamento');
 const { calcularDecimoTerceiro } = require('./payroll.decimo');
+const { calcularAdiantamentoSalarial } = require('./payroll.adiantamento');
 const { calcularRescisao } = require('./payroll.rescisao');
 const { calcularSaldoFerias } = require('./payroll.saldoFerias');
 const { diasEntreISO } = require('./payroll.shared');
@@ -24,8 +25,9 @@ async function putConfig(req, res, next) {
       modoBancoHoras, heDiaUtilPercent, heDomingoFeriadoPercent,
       adicionalNoturnoPercent, toleranciaAtrasoMin, pagarDSR,
       permitirFolhaSemAssinatura, bancoCodigo, bancoAgencia, bancoConta, bancoConvenio,
-      vtPercentMax, vtProporcionalFaltas, descontarAtrasos, descontoAtrasoDiarioPercent,
+      vtPercentMax, vtProporcionalFaltas,       descontarAtrasos, descontoAtrasoDiarioPercent,
       descontarIntervaloInsuficiente, descontoIntervaloDiarioPercent,
+      adiantamentoPercent, descontarAdiantamentoNaFolha,
     } = req.body;
 
     const data = {};
@@ -42,6 +44,12 @@ async function putConfig(req, res, next) {
     if (descontoAtrasoDiarioPercent !== undefined) data.descontoAtrasoDiarioPercent = Number(descontoAtrasoDiarioPercent);
     if (descontarIntervaloInsuficiente !== undefined) data.descontarIntervaloInsuficiente = Boolean(descontarIntervaloInsuficiente);
     if (descontoIntervaloDiarioPercent !== undefined) data.descontoIntervaloDiarioPercent = Number(descontoIntervaloDiarioPercent);
+    if (adiantamentoPercent !== undefined) {
+      data.adiantamentoPercent = Math.min(100, Math.max(0, Number(adiantamentoPercent) || 0));
+    }
+    if (descontarAdiantamentoNaFolha !== undefined) {
+      data.descontarAdiantamentoNaFolha = Boolean(descontarAdiantamentoNaFolha);
+    }
     if (bancoCodigo !== undefined) data.bancoCodigo = bancoCodigo || null;
     if (bancoAgencia !== undefined) data.bancoAgencia = bancoAgencia || null;
     if (bancoConta !== undefined) data.bancoConta = bancoConta || null;
@@ -61,6 +69,11 @@ async function calcular(req, res, next) {
     const colaboradores = await repo.listColaboradoresCLT(req.tenantId);
     const colabMap = Object.fromEntries(colaboradores.map((c) => [c.id, c]));
 
+    const adiantamentoRun = await repo.findAdiantamentoRun(req.tenantId, mes, ano);
+    const adiantamentoPorUsuario = Object.fromEntries(
+      (adiantamentoRun?.holerites || []).map((h) => [h.usuarioId, Number(h.liquido)]),
+    );
+
     const { relatorio } = await montarEspelhoMensal(req.tenantId, mes, ano);
 
     const pendencias = [];
@@ -78,7 +91,9 @@ async function calcular(req, res, next) {
 
       pendencias.push(...validarPendencias(espelhoEnriquecido, config));
 
-      const calc = calcularHolerite(config, espelhoEnriquecido, usuario);
+      const calc = calcularHolerite(config, espelhoEnriquecido, usuario, {
+        valorAdiantamento: adiantamentoPorUsuario[usuario.id] || 0,
+      });
       if (calc.erro) {
         pendencias.push({
           tipo: 'ERRO_CALCULO',
@@ -414,6 +429,86 @@ async function downloadDecimoHoleritePdf(req, res, next) {
   } catch (err) { next(err); }
 }
 
+async function calcularAdiantamento(req, res, next) {
+  try {
+    const mes = parseInt(req.body.mes) || new Date().getMonth() + 1;
+    const ano = parseInt(req.body.ano) || new Date().getFullYear();
+
+    const config = await repo.getOrCreateConfig(req.tenantId);
+    const percent = req.body.percent != null
+      ? Math.min(100, Math.max(0, Number(req.body.percent) || 0))
+      : (config.adiantamentoPercent ?? 40);
+
+    if (percent <= 0) {
+      return res.status(400).json({ error: 'Percentual de adiantamento inválido' });
+    }
+
+    let colaboradores = await repo.listColaboradoresCLT(req.tenantId);
+    if (req.body.usuarioIds?.length) {
+      const ids = new Set(req.body.usuarioIds);
+      colaboradores = colaboradores.filter((c) => ids.has(c.id));
+    }
+
+    const holerites = [];
+    const erros = [];
+
+    for (const usuario of colaboradores) {
+      const calc = calcularAdiantamentoSalarial({ usuario, percent });
+      if (calc.erro) {
+        erros.push({ usuarioId: usuario.id, nome: usuario.nome, mensagem: calc.erro });
+        continue;
+      }
+      holerites.push({
+        usuarioId: usuario.id,
+        percent: calc.percent,
+        proventos: calc.proventos,
+        descontos: calc.descontos,
+        bases: calc.bases,
+        liquido: calc.liquido,
+      });
+    }
+
+    const run = await repo.upsertAdiantamentoRun(req.tenantId, mes, ano, percent, holerites);
+    res.json({ run, erros });
+  } catch (err) { next(err); }
+}
+
+async function listarAdiantamentoRuns(req, res, next) {
+  try {
+    const runs = await repo.listAdiantamentoRuns(req.tenantId, req.query);
+    res.json(runs);
+  } catch (err) { next(err); }
+}
+
+async function obterAdiantamentoRun(req, res, next) {
+  try {
+    const run = await repo.findAdiantamentoRunById(req.tenantId, req.params.id);
+    if (!run) return res.status(404).json({ error: 'Cálculo de adiantamento não encontrado' });
+    res.json(run);
+  } catch (err) { next(err); }
+}
+
+async function downloadAdiantamentoHoleritePdf(req, res, next) {
+  try {
+    const holerite = await repo.findAdiantamentoHolerite(req.tenantId, req.params.id);
+    if (!holerite) return res.status(404).json({ error: 'Holerite de adiantamento não encontrado' });
+
+    const buf = await gerarHoleritePdf({
+      tenant: holerite.run.tenant,
+      usuario: holerite.usuario,
+      holerite,
+      periodo: { mes: holerite.run.mes, ano: holerite.run.ano },
+      titulo: 'ADIANTAMENTO SALARIAL',
+      subtitulo: `Ref. ${String(holerite.run.mes).padStart(2, '0')}/${holerite.run.ano} · ${holerite.percent}% do salário`,
+    });
+
+    const nome = `adiantamento-${holerite.usuario.nome.replace(/\s+/g, '-')}-${holerite.run.mes}-${holerite.run.ano}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${nome}"`);
+    res.send(buf);
+  } catch (err) { next(err); }
+}
+
 async function calcularRescisaoEndpoint(req, res, next) {
   try {
     const {
@@ -500,6 +595,10 @@ module.exports = {
   listarDecimoRuns,
   obterDecimoRun,
   downloadDecimoHoleritePdf,
+  calcularAdiantamento,
+  listarAdiantamentoRuns,
+  obterAdiantamentoRun,
+  downloadAdiantamentoHoleritePdf,
   calcularRescisaoEndpoint,
   listarRescisoes,
   downloadRescisaoPdf,
