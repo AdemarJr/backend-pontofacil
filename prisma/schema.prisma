@@ -70,6 +70,7 @@ model Tenant {
   folhaRuns      FolhaRun[]
   feriasPagamentos FeriasPagamento[]
   decimoTerceiroRuns DecimoTerceiroRun[]
+  adiantamentoRuns AdiantamentoSalarialRun[]
   rescisoes      Rescisao[]
 
   usuarios       Usuario[]
@@ -264,6 +265,7 @@ model Usuario {
   folhaRunsFechados FolhaRun[] @relation("FolhaRunFechadaPor")
   feriasPagamentos FeriasPagamento[]
   decimoTerceiroHolerites DecimoTerceiroHolerite[]
+  adiantamentoHolerites AdiantamentoSalarialHolerite[]
   rescisoes   Rescisao[]
 
   registros   RegistroPonto[]
@@ -348,6 +350,10 @@ model FolhaConfig {
   descontarIntervaloInsuficiente Boolean     @default(false)
   /// % de 1 dia de salário por dia com intervalo insuficiente
   descontoIntervaloDiarioPercent Int        @default(25)
+  /// Adiantamento salarial (% do salário base, tipicamente 40%)
+  adiantamentoPercent           Int         @default(40)
+  /// Se true, desconta automaticamente o adiantamento na folha mensal do mesmo mês
+  descontarAdiantamentoNaFolha  Boolean     @default(true)
   tabelasVersao             String?
   tabelasSnapshot           Json?
   /// Dados bancários da empresa (CNAB)
@@ -790,6 +796,42 @@ model DecimoTerceiroHolerite {
 
   @@unique([runId, usuarioId])
   @@map("decimo_terceiro_holerites")
+}
+
+// ---- ADIANTAMENTO SALARIAL (meio do mês) ----
+model AdiantamentoSalarialRun {
+  id          String         @id @default(uuid())
+  tenantId    String
+  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  mes         Int
+  ano         Int
+  percent     Int            @default(40)
+  status      StatusFolhaRun @default(CALCULADA)
+  calculadaEm DateTime?
+  holerites   AdiantamentoSalarialHolerite[]
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@unique([tenantId, mes, ano])
+  @@map("adiantamento_salarial_runs")
+}
+
+model AdiantamentoSalarialHolerite {
+  id        String                  @id @default(uuid())
+  runId     String
+  run       AdiantamentoSalarialRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  usuarioId String
+  usuario   Usuario                 @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  percent   Int
+  proventos Json
+  descontos Json
+  bases     Json
+  liquido   Decimal                 @db.Decimal(12, 2)
+  createdAt DateTime                @default(now())
+  updatedAt DateTime                @updatedAt
+
+  @@unique([runId, usuarioId])
+  @@map("adiantamento_salarial_holerites")
 }
 
 // ---- RESCISÃO ----

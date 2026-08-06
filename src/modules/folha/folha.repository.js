@@ -15,6 +15,8 @@ const DEFAULT_CONFIG = {
   descontoAtrasoDiarioPercent: 25,
   descontarIntervaloInsuficiente: false,
   descontoIntervaloDiarioPercent: 25,
+  adiantamentoPercent: 40,
+  descontarAdiantamentoNaFolha: true,
   tabelasVersao: tabelas2025.versao,
   tabelasSnapshot: tabelas2025,
 };
@@ -318,6 +320,89 @@ async function findRescisao(tenantId, id) {
   });
 }
 
+async function upsertAdiantamentoRun(tenantId, mes, ano, percent, holerites) {
+  return prisma.$transaction(async (tx) => {
+    const run = await tx.adiantamentoSalarialRun.upsert({
+      where: { tenantId_mes_ano: { tenantId, mes, ano } },
+      create: {
+        tenantId, mes, ano, percent, status: 'CALCULADA', calculadaEm: new Date(),
+      },
+      update: { percent, status: 'CALCULADA', calculadaEm: new Date() },
+    });
+
+    await tx.adiantamentoSalarialHolerite.deleteMany({ where: { runId: run.id } });
+
+    if (holerites?.length) {
+      await tx.adiantamentoSalarialHolerite.createMany({
+        data: holerites.map((h) => ({
+          runId: run.id,
+          usuarioId: h.usuarioId,
+          percent: h.percent,
+          proventos: h.proventos,
+          descontos: h.descontos,
+          bases: h.bases,
+          liquido: h.liquido,
+        })),
+      });
+    }
+
+    return tx.adiantamentoSalarialRun.findUnique({
+      where: { id: run.id },
+      include: {
+        holerites: {
+          include: { usuario: { select: { id: true, nome: true, cpf: true, cargo: true } } },
+          orderBy: { usuario: { nome: 'asc' } },
+        },
+      },
+    });
+  });
+}
+
+async function listAdiantamentoRuns(tenantId, { mes, ano } = {}) {
+  return prisma.adiantamentoSalarialRun.findMany({
+    where: {
+      tenantId,
+      ...(mes && { mes: Number(mes) }),
+      ...(ano && { ano: Number(ano) }),
+    },
+    include: { _count: { select: { holerites: true } } },
+    orderBy: [{ ano: 'desc' }, { mes: 'desc' }],
+  });
+}
+
+async function findAdiantamentoRun(tenantId, mes, ano) {
+  return prisma.adiantamentoSalarialRun.findUnique({
+    where: { tenantId_mes_ano: { tenantId, mes, ano } },
+    include: {
+      holerites: {
+        select: { usuarioId: true, liquido: true, percent: true },
+      },
+    },
+  });
+}
+
+async function findAdiantamentoRunById(tenantId, runId) {
+  return prisma.adiantamentoSalarialRun.findFirst({
+    where: { id: runId, tenantId },
+    include: {
+      holerites: {
+        include: { usuario: { select: { id: true, nome: true, cpf: true, cargo: true } } },
+        orderBy: { usuario: { nome: 'asc' } },
+      },
+    },
+  });
+}
+
+async function findAdiantamentoHolerite(tenantId, holeriteId) {
+  return prisma.adiantamentoSalarialHolerite.findFirst({
+    where: { id: holeriteId, run: { tenantId } },
+    include: {
+      usuario: true,
+      run: { include: { tenant: { select: { razaoSocial: true, nomeFantasia: true, cnpj: true } } } },
+    },
+  });
+}
+
 module.exports = {
   getOrCreateConfig,
   updateConfig,
@@ -339,4 +424,9 @@ module.exports = {
   createRescisao,
   listRescisoes,
   findRescisao,
+  upsertAdiantamentoRun,
+  listAdiantamentoRuns,
+  findAdiantamentoRun,
+  findAdiantamentoRunById,
+  findAdiantamentoHolerite,
 };

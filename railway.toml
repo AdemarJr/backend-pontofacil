@@ -1,7 +1,9 @@
 [build]
-buildCommand = "npm install && npx prisma migrate deploy && npx prisma generate"
+buildCommand = "npm install && npx prisma generate"
 
 [deploy]
-startCommand = "node src/server.js"
+# migrate no start (build nem sempre tem DATABASE_URL).
+# timeout + || true: se DB/migrate travar, o Node sobe mesmo assim (evita 502 sem CORS).
+startCommand = "sh -c 'timeout 45 npx prisma migrate deploy || true; exec node src/server.js'"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

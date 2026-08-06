@@ -9,5 +9,5 @@ RUN npx prisma generate
 
 EXPOSE 3001
 
-# migrate deploy no start: o build não tem acesso ao banco
-CMD ["sh", "-c", "npx prisma migrate deploy && node src/server.js"]
+# migrate com timeout; se travar/falhar, sobe o Node mesmo assim (evita 502)
+CMD ["sh", "-c", "timeout 45 npx prisma migrate deploy || true; exec node src/server.js"]
