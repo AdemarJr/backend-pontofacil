@@ -2,7 +2,8 @@
 buildCommand = "npm install && npx prisma generate"
 
 [deploy]
-# migrate deploy no start: build no Railway nem sempre tem DATABASE_URL válida
-startCommand = "npx prisma migrate deploy && node src/server.js"
+# migrate no start (build nem sempre tem DATABASE_URL).
+# timeout + || true: se DB/migrate travar, o Node sobe mesmo assim (evita 502 sem CORS).
+startCommand = "sh -c 'timeout 45 npx prisma migrate deploy || true; exec node src/server.js'"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
