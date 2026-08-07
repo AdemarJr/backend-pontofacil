@@ -152,10 +152,35 @@ async function loginPin(req, res, next) {
 
     const tenant = await prisma.tenant.findUnique({
       where: { id: tenantId },
-      select: { id: true, status: true, permitirTotem: true },
+      select: {
+        id: true,
+        status: true,
+        permitirTotem: true,
+        periodoContrato: true,
+        contractEndDate: true,
+      },
     });
-    if (!tenant || tenant.status !== 'ATIVO') {
-      return res.status(403).json({ error: 'Empresa com acesso suspenso' });
+
+    if (!tenant) {
+      return res.status(404).json({
+        error: 'Empresa não encontrada. Verifique o código da empresa no totem.',
+        code: 'TENANT_NOT_FOUND',
+      });
+    }
+    if (tenant.status === 'CANCELADO') {
+      return res.status(403).json({
+        error: 'Empresa cancelada. Entre em contato com o suporte.',
+        code: 'TENANT_CANCELLED',
+      });
+    }
+    if (tenant.status !== 'ATIVO') {
+      return res.status(403).json({
+        error: 'Empresa com acesso suspenso. Peça ao administrador para reativar no painel.',
+        code: 'TENANT_SUSPENDED',
+      });
+    }
+    if (isContractExpired(tenant)) {
+      return res.status(403).json(contractExpiredPayload(tenant));
     }
     if (tenant.permitirTotem === false) {
       return res.status(403).json({ error: 'Registro por totem está desativado para esta empresa' });

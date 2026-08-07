@@ -1,28 +1,32 @@
 // src/services/contractExpiry.service.js — suspende tenants com contrato vencido (sem n8n)
 const prisma = require('../infra/prisma');
+const { inicioDoDia } = require('../shared/contractCheck');
 
+/**
+ * Suspende empresas ATIVAS cujo contractEndDate já passou (dia do fim ainda é válido).
+ * Compara por calendário: fim em 07/08 só suspende a partir de 08/08 00:00.
+ */
 async function suspenderContratosExpirados() {
-  const hoje = new Date();
-  hoje.setHours(23, 59, 59, 999);
+  const inicioHoje = inicioDoDia();
 
-  const expirados = await prisma.tenant.findMany({
+  const candidatos = await prisma.tenant.findMany({
     where: {
-      contractEndDate: { lt: hoje },
       status: 'ATIVO',
       periodoContrato: { not: null },
+      contractEndDate: { not: null, lt: inicioHoje },
     },
     select: { id: true, nomeFantasia: true, contractEndDate: true, periodoContrato: true },
   });
 
-  if (expirados.length > 0) {
+  if (candidatos.length > 0) {
     await prisma.tenant.updateMany({
-      where: { id: { in: expirados.map((t) => t.id) } },
+      where: { id: { in: candidatos.map((t) => t.id) } },
       data: { status: 'SUSPENSO' },
     });
-    console.log(`[contrato] ${expirados.length} empresa(s) suspensa(s) por contrato vencido.`);
+    console.log(`[contrato] ${candidatos.length} empresa(s) suspensa(s) por contrato vencido.`);
   }
 
-  return { suspensos: expirados.length, tenants: expirados };
+  return { suspensos: candidatos.length, tenants: candidatos };
 }
 
 function iniciarJobVerificacaoContratos(intervaloMs = 6 * 60 * 60 * 1000) {
