@@ -46,10 +46,12 @@ async function assertPodeAdicionarColaborador(tenantId, extra = 1) {
   const atual = await contarColaboradoresAtivos(tenantId);
   if (atual + extra > maxColaboradores) {
     const err = new Error(
-      `Limite do plano atingido (${atual}/${maxColaboradores} colaboradores). Faça upgrade do plano para cadastrar mais pessoas.`
+      `Seu plano chegou ao limite de colaboradores (${atual}/${maxColaboradores}). Fale com o administrador e solicite a mudança de plano.`
     );
     err.status = 403;
     err.code = 'PLAN_USER_LIMIT';
+    err.atual = atual;
+    err.maxColaboradores = maxColaboradores;
     throw err;
   }
   return info;

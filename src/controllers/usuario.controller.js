@@ -92,7 +92,14 @@ async function criar(req, res, next) {
     try {
       await assertPodeAdicionarColaborador(req.tenantId, 1);
     } catch (e) {
-      if (e.status) return res.status(e.status).json({ error: e.message, code: e.code });
+      if (e.status) {
+        return res.status(e.status).json({
+          error: e.message,
+          code: e.code,
+          atual: e.atual,
+          maxColaboradores: e.maxColaboradores,
+        });
+      }
       throw e;
     }
 
@@ -155,7 +162,7 @@ async function criar(req, res, next) {
       select: { id: true, nome: true, email: true, cargo: true, role: true, createdAt: true }
     });
 
-    // Convite por SMTP pode demorar ou travar — responde na hora e envia em segundo plano (evita timeout no cliente).
+    // Cadastro sempre persiste; e-mail é melhor esforço (não desfaz o usuário se falhar).
     if (enviarConviteEmail === false) {
       return res.status(201).json({
         ...usuario,
@@ -164,28 +171,55 @@ async function criar(req, res, next) {
       });
     }
 
-    res.status(201).json({
+    const CONVITE_TIMEOUT_MS = 12000;
+    let conviteEmailEnviado = false;
+    let conviteEmailMotivo = 'falha_envio';
+
+    try {
+      const r = await Promise.race([
+        sendConviteUsuario(usuario.id),
+        new Promise((_, reject) => {
+          const err = new Error('timeout_convite');
+          err.code = 'CONVITE_TIMEOUT';
+          setTimeout(() => reject(err), CONVITE_TIMEOUT_MS);
+        }),
+      ]);
+
+      if (r?.ok && !r?.skipped) {
+        conviteEmailEnviado = true;
+        conviteEmailMotivo = 'enviado';
+      } else if (r?.skipped) {
+        conviteEmailMotivo = r.reason || 'smtp_nao_configurado';
+      } else {
+        conviteEmailMotivo = r?.reason || 'falha_envio';
+      }
+    } catch (e) {
+      if (e?.code === 'CONVITE_TIMEOUT') {
+        conviteEmailMotivo = 'envio_em_segundo_plano';
+        sendConviteUsuario(usuario.id)
+          .then((r) => {
+            if (r?.ok && !r?.skipped) {
+              console.log('[usuarios/criar] Convite enviado (após timeout) para', usuario.email);
+            } else {
+              console.warn(
+                '[usuarios/criar] Convite não enviado (após timeout):',
+                r?.reason || 'desconhecido',
+                r?.error || ''
+              );
+            }
+          })
+          .catch((err) => console.error('[usuarios/criar] Convite (após timeout):', err?.message || err));
+      } else {
+        conviteEmailMotivo = 'falha_envio';
+        console.error('[usuarios/criar] Convite falhou:', e?.message || e);
+      }
+    }
+
+    return res.status(201).json({
       ...usuario,
-      conviteEmailEnviado: false,
-      conviteEmailMotivo: 'envio_em_segundo_plano',
+      conviteEmailEnviado,
+      conviteEmailMotivo,
     });
-
-    sendConviteUsuario(usuario.id)
-      .then((r) => {
-        if (r?.ok && !r?.skipped) {
-          console.log('[usuarios/criar] Convite enviado (segundo plano) para', usuario.email);
-        } else {
-          console.warn(
-            '[usuarios/criar] Convite não enviado (segundo plano):',
-            r?.reason || 'desconhecido',
-            r?.error || '',
-            r?.skipped ? '(skipped)' : ''
-          );
-        }
-      })
-      .catch((e) => console.error('[usuarios/criar] Convite (segundo plano):', e?.message || e));
-
-    return;
   } catch (err) { next(err); }
 }
 
