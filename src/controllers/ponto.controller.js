@@ -1,7 +1,7 @@
 // src/controllers/ponto.controller.js
 const { uploadFoto, gerarUrlAssinada } = require('../services/s3.service');
 const { validarGeofence, validarEmAlgumLocal } = require('../utils/geofence');
-const { calcularDia, pad2 } = require('../utils/espelhoCalculo');
+const { calcularDia, pad2, agruparPontosPorDiaJornada } = require('../utils/espelhoCalculo');
 const crypto = require('crypto');
 
 const prisma = require('../infra/prisma');
@@ -10,6 +10,9 @@ const {
   determinarProximoTipo,
   tiposPermitidosRegistro,
   ultimoTipoFechaCiclo,
+  turnoAbertoContinua,
+  resolverProximoTipo,
+  LIMITE_TURNO_ABERTO_HORAS,
 } = require('../modules/ponto/sequenciaMarcacao');
 const { usuarioTemDocumento } = require('../shared/documentoIdentificacao');
 const { registrarAuditoria, ipHashFromReq } = require('../shared/auditoria.service');
@@ -17,7 +20,7 @@ const { CONSENTIMENTO_VERSAO_ATUAL } = require('../shared/consentimento');
 const { gerarComprovantePdfStream, urlComprovante } = require('../modules/ponto/comprovanteRegistro.service');
 
 const LIMITE_PENDENCIA_MODAL_HORAS = 12;
-const LIMITE_TURNO_MAX_HORAS = 16;
+const LIMITE_TURNO_MAX_HORAS = LIMITE_TURNO_ABERTO_HORAS;
 const COOLDOWN_BATIDA_SEGUNDOS = 15;
 
 const DEFAULT_MIN_TRABALHO_ANTES_SAIDA_MIN = 30;
@@ -96,16 +99,17 @@ async function pendenciasColaborador(req, res, next) {
       orderBy: { dataHora: 'asc' },
     });
 
-    const porDia = new Map();
-    for (const r of registros) {
-      const efetivo = r.ajuste?.dataHoraNova || r.dataHora;
-      const dia = fmtDiaISO(efetivo);
-      if (!porDia.has(dia)) porDia.set(dia, []);
-      porDia.get(dia).push({ id: r.id, tipo: r.tipo, dataHora: efetivo });
-    }
+    const pontosFlat = registros.map((r) => ({
+      id: r.id,
+      tipo: r.tipo,
+      dataHora: r.ajuste?.dataHoraNova || r.dataHora,
+    }));
+    const porDia = agruparPontosPorDiaJornada(pontosFlat, {
+      limiteHorasTurno: LIMITE_TURNO_MAX_HORAS,
+    });
 
     const pendencias = [];
-    for (const [dia, pontos] of porDia.entries()) {
+    for (const [dia, pontos] of Object.entries(porDia)) {
       const calc = calcularDia(pontos, { dataRef: dia, modoMarcacao });
       if (!calc.flags?.faltandoMarcacao) continue;
 
@@ -488,9 +492,14 @@ async function registrar(req, res, next) {
     });
 
     const ultimoEhHoje = Boolean(ultimo) && isSameLocalDay(ultimo.dataHora, refTime);
-    const proximoEsperado = ultimoEhHoje
-      ? determinarProximoTipo(ultimo?.tipo, modoMarcacao)
-      : 'ENTRADA';
+    const cicloAberto = turnoAbertoContinua(ultimo, refTime, {
+      modoMarcacao,
+      limiteHoras: LIMITE_TURNO_MAX_HORAS,
+    });
+    const proximoEsperado = resolverProximoTipo(ultimo, refTime, {
+      modoMarcacao,
+      limiteHoras: LIMITE_TURNO_MAX_HORAS,
+    });
     const ultimoAbreCiclo = Boolean(ultimo) && !ultimoTipoFechaCiclo(ultimo.tipo, modoMarcacao);
     const horasDesdeUltimo = ultimo ? diffHoras(refTime, ultimo.dataHora) : 0;
     const segundosDesdeUltimo = ultimo ? diffSegundos(refTime, ultimo.dataHora) : 0;
@@ -509,7 +518,9 @@ async function registrar(req, res, next) {
       });
     }
 
-    if (!forcarNovoTurno && !ultimoEhHoje && ultimoAbreCiclo && ultimo?.id) {
+    // Turno abandonado (expirou o limite): marca pendência e inicia novo ciclo.
+    // Não trata virada de meia-noite com plantão ainda aberto como abandono.
+    if (!forcarNovoTurno && ultimoAbreCiclo && !cicloAberto && ultimo?.id) {
       await prisma.registroPonto.update({
         where: { id: ultimo.id },
         data: { validado: false },
@@ -533,7 +544,7 @@ async function registrar(req, res, next) {
       actorRole: req.usuario.role,
     };
 
-    if (ultimoEhHoje && ultimoAbreCiclo && horasDesdeUltimo >= LIMITE_TURNO_MAX_HORAS) {
+    if (!forcarNovoTurno && ultimoAbreCiclo && !cicloAberto && horasDesdeUltimo >= LIMITE_TURNO_MAX_HORAS) {
       await prisma.registroPonto.update({
         where: { id: ultimo.id },
         data: { validado: false },
@@ -592,19 +603,31 @@ async function registrar(req, res, next) {
       const minIntervaloAlmocoMin =
         tenant?.intervaloMinimoAlmocoMinutos ?? DEFAULT_MIN_INTERVALO_ALMOCO_MIN;
 
-      const { inicio, fim } = inicioFimDoDia(refTime);
-      const ultimoHoje = await prisma.registroPonto.findFirst({
-        where: { tenantId, usuarioId, deletedAt: null, dataHora: { gte: inicio, lte: fim } },
-        orderBy: { dataHora: 'desc' },
-        select: { id: true, tipo: true, dataHora: true },
-      });
+      // Usa o último registro do turno aberto (pode ser do dia anterior em plantão noturno).
+      const ultimoTurno = cicloAberto
+        ? ultimo
+        : (
+            await prisma.registroPonto.findFirst({
+              where: {
+                tenantId,
+                usuarioId,
+                deletedAt: null,
+                dataHora: (() => {
+                  const { inicio, fim } = inicioFimDoDia(refTime);
+                  return { gte: inicio, lte: fim };
+                })(),
+              },
+              orderBy: { dataHora: 'desc' },
+              select: { id: true, tipo: true, dataHora: true },
+            })
+          );
 
-      if (ultimoHoje?.id) {
-        const minutos = diffMinutos(refTime, ultimoHoje.dataHora);
+      if (ultimoTurno?.id) {
+        const minutos = diffMinutos(refTime, ultimoTurno.dataHora);
 
         if (
           (tipo === 'SAIDA_ALMOCO' || tipo === 'SAIDA') &&
-          (ultimoHoje.tipo === 'ENTRADA' || ultimoHoje.tipo === 'RETORNO_ALMOCO') &&
+          (ultimoTurno.tipo === 'ENTRADA' || ultimoTurno.tipo === 'RETORNO_ALMOCO') &&
           minutos < minTrabalhoAntesSaidaMin
         ) {
           return res.status(409).json({
@@ -613,22 +636,22 @@ async function registrar(req, res, next) {
             code: 'REGISTRO_MUITO_CEDO',
             regra: 'MIN_TRABALHO',
             tipoTentado: tipo,
-            ultimoTipo: ultimoHoje.tipo,
-            ultimoEm: ultimoHoje.dataHora,
+            ultimoTipo: ultimoTurno.tipo,
+            ultimoEm: ultimoTurno.dataHora,
             minutosDecorridos: Math.round(minutos),
             minimoMinutos: minTrabalhoAntesSaidaMin,
           });
         }
 
-        if (tipo === 'RETORNO_ALMOCO' && ultimoHoje.tipo === 'SAIDA_ALMOCO' && minutos < minIntervaloAlmocoMin) {
+        if (tipo === 'RETORNO_ALMOCO' && ultimoTurno.tipo === 'SAIDA_ALMOCO' && minutos < minIntervaloAlmocoMin) {
           return res.status(409).json({
             error:
               'O intervalo ainda não completou o tempo mínimo. Se for necessário, confirme para registrar mesmo assim.',
             code: 'REGISTRO_MUITO_CEDO',
             regra: 'MIN_INTERVALO',
             tipoTentado: tipo,
-            ultimoTipo: ultimoHoje.tipo,
-            ultimoEm: ultimoHoje.dataHora,
+            ultimoTipo: ultimoTurno.tipo,
+            ultimoEm: ultimoTurno.dataHora,
             minutosDecorridos: Math.round(minutos),
             minimoMinutos: minIntervaloAlmocoMin,
           });
@@ -644,8 +667,13 @@ async function registrar(req, res, next) {
     });
 
     const prox = determinarProximoTipo(registro.tipo, modoMarcacao);
+    // Pendência de dia anterior só quando o ciclo expirou (não em plantão noturno válido).
     const avisoViradaDia =
-      !forcarNovoTurno && !ultimoEhHoje && ultimoAbreCiclo && ultimo?.id
+      !forcarNovoTurno &&
+      !ultimoEhHoje &&
+      ultimoAbreCiclo &&
+      !cicloAberto &&
+      ultimo?.id
         ? {
             code: 'PENDENCIA_DIA_ANTERIOR',
             message:
@@ -664,6 +692,9 @@ async function registrar(req, res, next) {
       registro: registroResponse(registro, prox),
       proximoTipo: prox,
       modoMarcacao,
+      ...(cicloAberto && !ultimoEhHoje
+        ? { turnoNoturno: true, turnoIniciadoEm: ultimo?.dataHora }
+        : {}),
     });
   } catch (err) {
     next(err);
@@ -756,15 +787,36 @@ async function ultimoPonto(req, res, next) {
     });
 
     const agora = new Date();
+    const cicloAberto = turnoAbertoContinua(ultimo, agora, {
+      modoMarcacao,
+      limiteHoras: LIMITE_TURNO_MAX_HORAS,
+    });
     const ultimoEhHoje = Boolean(ultimo) && isSameLocalDay(ultimo.dataHora, agora);
-    const proximoTipo = ultimoEhHoje
-      ? determinarProximoTipo(ultimo?.tipo, modoMarcacao)
-      : 'ENTRADA';
+    const proximoTipo = resolverProximoTipo(ultimo, agora, {
+      modoMarcacao,
+      limiteHoras: LIMITE_TURNO_MAX_HORAS,
+    });
 
     const pendenciaCheckin = (() => {
       if (!ultimo) return { aberta: false };
       if (ultimoTipoFechaCiclo(ultimo.tipo, modoMarcacao)) return { aberta: false };
       const horas = diffHoras(new Date(), ultimo.dataHora);
+
+      // Plantão noturno / turno aberto cross-midnight: continuar sequência (SAÍDA), sem tratar como erro.
+      if (cicloAberto) {
+        return {
+          aberta: false,
+          turnoAberto: true,
+          cruzaMeiaNoite: !ultimoEhHoje,
+          registroId: ultimo.id,
+          ultimoTipo: ultimo.tipo,
+          ultimoEm: ultimo.dataHora,
+          horasAberto: Math.round(horas * 10) / 10,
+          proximoTipo,
+          motivo: !ultimoEhHoje ? 'TURNO_NOTURNO_ABERTO' : 'TURNO_ABERTO',
+        };
+      }
+
       if (!ultimoEhHoje) {
         return {
           aberta: false,
@@ -790,7 +842,15 @@ async function ultimoPonto(req, res, next) {
       };
     })();
 
-    res.json({ ultimoPonto: ultimo, proximoTipo, pendenciaCheckin, modoMarcacao });
+    res.json({
+      ultimoPonto: ultimo,
+      proximoTipo,
+      pendenciaCheckin,
+      modoMarcacao,
+      ...(cicloAberto && !ultimoEhHoje
+        ? { turnoNoturno: true, turnoIniciadoEm: ultimo?.dataHora }
+        : {}),
+    });
   } catch (err) {
     next(err);
   }

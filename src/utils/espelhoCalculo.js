@@ -68,6 +68,64 @@ function minutosDoDia(dataHora) {
   return dt.getHours() * 60 + dt.getMinutes();
 }
 
+/** Escala noturna: saída no dia seguinte (ex.: 18:00 → 06:00). */
+function escalaCruzaMeiaNoite(escala) {
+  if (!escala) return false;
+  const ini = parseHoraMinutos(escala.horaInicio);
+  const fim = parseHoraMinutos(escala.horaFim);
+  return ini != null && fim != null && fim <= ini;
+}
+
+function fmtDateISOLocal(d) {
+  const dt = new Date(d);
+  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+}
+
+/**
+ * Agrupa batidas pelo dia de início do turno (ENTRADA),
+ * para plantões que cruzam meia-noite.
+ */
+function agruparPontosPorDiaJornada(pontos, { limiteHorasTurno = 16 } = {}) {
+  const sorted = [...(pontos || [])].sort(
+    (a, b) => new Date(a.dataHora) - new Date(b.dataHora)
+  );
+  const porDia = {};
+  let turnoDiaRef = null;
+  let turnoInicioMs = null;
+
+  for (const p of sorted) {
+    const tipo = String(p.tipo || '').toUpperCase();
+    const dt = new Date(p.dataHora);
+    const diaCivil = fmtDateISOLocal(dt);
+    let diaRef = diaCivil;
+
+    if (tipo === 'ENTRADA') {
+      turnoDiaRef = diaCivil;
+      turnoInicioMs = dt.getTime();
+      diaRef = diaCivil;
+    } else if (turnoDiaRef != null && turnoInicioMs != null) {
+      const horas = (dt.getTime() - turnoInicioMs) / (1000 * 60 * 60);
+      if (horas >= 0 && horas < limiteHorasTurno) {
+        diaRef = turnoDiaRef;
+      } else {
+        turnoDiaRef = null;
+        turnoInicioMs = null;
+        diaRef = diaCivil;
+      }
+    }
+
+    if (!porDia[diaRef]) porDia[diaRef] = [];
+    porDia[diaRef].push(p);
+
+    if (tipo === 'SAIDA') {
+      turnoDiaRef = null;
+      turnoInicioMs = null;
+    }
+  }
+
+  return porDia;
+}
+
 /**
  * @param {Array<{tipo:string,dataHora:string|Date}>} pontos
  * @param {{ escala?: object|null, toleranciaMinutos?: number, dataRef?: string, clt?: object|null }} opts
@@ -159,12 +217,24 @@ function calcularDia(pontos, opts = {}) {
     const espEntrada = parseHoraMinutos(escalaAplicavel.horaInicio);
     const espSaida = parseHoraMinutos(escalaAplicavel.horaFim);
     const tol = Number(toleranciaMinutos) || 0;
+    const overnight = escalaCruzaMeiaNoite(escalaAplicavel);
 
     if (espEntrada != null && entrada) {
       entradaAtrasada = minutosDoDia(entrada.dataHora) > espEntrada + tol;
     }
     if (espSaida != null && saida) {
-      saidaAntecipada = minutosDoDia(saida.dataHora) < espSaida - tol;
+      if (overnight && entrada) {
+        const diaEnt = fmtDateISOLocal(entrada.dataHora);
+        const diaSai = fmtDateISOLocal(saida.dataHora);
+        if (diaSai === diaEnt) {
+          // Saiu no mesmo dia civil antes da virada — antecipado em relação ao plantão.
+          saidaAntecipada = true;
+        } else {
+          saidaAntecipada = minutosDoDia(saida.dataHora) < espSaida - tol;
+        }
+      } else {
+        saidaAntecipada = minutosDoDia(saida.dataHora) < espSaida - tol;
+      }
     }
 
     const espSaiAlmoco = parseHoraMinutos(escalaAplicavel.horaSaidaAlmoco);
@@ -201,6 +271,7 @@ function calcularDia(pontos, opts = {}) {
       entradaAtrasada,
       saidaAntecipada,
       almocoForaDaJanela,
+      turnoNoturno: escalaCruzaMeiaNoite(escalaAplicavel),
     },
     esperado: escalaAplicavel
       ? {
@@ -208,6 +279,7 @@ function calcularDia(pontos, opts = {}) {
           saida: escalaAplicavel.horaFim,
           intervaloMinimo: intervaloMinimo,
           cargaHorariaDiaria: escalaAplicavel.cargaHorariaDiaria,
+          cruzaMeiaNoite: escalaCruzaMeiaNoite(escalaAplicavel),
         }
       : null,
   };
@@ -225,6 +297,8 @@ module.exports = {
   diaSemanaAbrev,
   diaSemanaISO,
   escalaParaDia,
+  escalaCruzaMeiaNoite,
+  agruparPontosPorDiaJornada,
   fmtHours,
   formatarDataBR,
   fmtTime,

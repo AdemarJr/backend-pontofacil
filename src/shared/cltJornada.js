@@ -72,14 +72,26 @@ function cltOptsFromTenant(tenant) {
   };
 }
 
-function validarEscalaCLT(cargaHorariaDiaria, diasSemana, intervaloMinutos, intervaloCCTMinutos = 60) {
+function validarEscalaCLT(
+  cargaHorariaDiaria,
+  diasSemana,
+  intervaloMinutos,
+  intervaloCCTMinutos = 60,
+  { overnight = false } = {}
+) {
   const carga = Number(cargaHorariaDiaria) || 8;
   const dias = Array.isArray(diasSemana) ? diasSemana.length : 0;
-  if (carga > 8) {
-    return 'Carga horária diária não pode exceder 8 horas (limite CLT).';
+  const maxDiaria = overnight ? 12 : 8;
+  if (carga > maxDiaria) {
+    return overnight
+      ? 'Carga horária diária em turno noturno não pode exceder 12 horas.'
+      : 'Carga horária diária não pode exceder 8 horas (limite CLT).';
   }
   if (carga * dias > 44) {
     return `Jornada semanal da escala (${(carga * dias).toFixed(1)}h) excede 44 horas (limite CLT).`;
+  }
+  if (overnight && Number(intervaloMinutos) === 0) {
+    return null;
   }
   const minIntervalo = intervaloMinimoLegal(Math.round(carga * 60), { intervaloCCTMinutos });
   if (intervaloMinutos != null && minIntervalo > 0 && Number(intervaloMinutos) < minIntervalo) {

@@ -2,6 +2,7 @@
 const {
   calcularDia,
   escalaParaDia,
+  agruparPontosPorDiaJornada,
   fmtHours,
   fmtTime,
   pad2,
@@ -13,6 +14,7 @@ const {
   calcularHeSemanal,
 } = require('../../shared/cltJornada');
 const prisma = require('../../infra/prisma');
+const { LIMITE_TURNO_ABERTO_HORAS } = require('../ponto/sequenciaMarcacao');
 
 const SELECT_REGISTRO_ESPELHO = {
   id: true,
@@ -196,13 +198,12 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
 
   const hojeISO = fmtDateISO(new Date());
   const pontosPorUsuarioDia = {};
+  const pontosBrutosPorUsuario = {};
   for (const r of registros) {
     const uid = r.usuarioId;
     if (!uidSet.has(uid)) continue;
-    const dia = fmtDateISO(r.ajuste ? r.ajuste.dataHoraNova : r.dataHora);
-    if (!pontosPorUsuarioDia[uid]) pontosPorUsuarioDia[uid] = {};
-    if (!pontosPorUsuarioDia[uid][dia]) pontosPorUsuarioDia[uid][dia] = [];
-    pontosPorUsuarioDia[uid][dia].push({
+    if (!pontosBrutosPorUsuario[uid]) pontosBrutosPorUsuario[uid] = [];
+    pontosBrutosPorUsuario[uid].push({
       id: r.id,
       tipo: r.tipo,
       dataHora: r.ajuste ? r.ajuste.dataHoraNova : r.dataHora,
@@ -210,6 +211,11 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       origem: r.origem,
       ajustado: !!r.ajuste,
       motivoAjuste: r.ajuste?.motivo,
+    });
+  }
+  for (const uid of Object.keys(pontosBrutosPorUsuario)) {
+    pontosPorUsuarioDia[uid] = agruparPontosPorDiaJornada(pontosBrutosPorUsuario[uid], {
+      limiteHorasTurno: LIMITE_TURNO_ABERTO_HORAS,
     });
   }
 
@@ -492,8 +498,11 @@ function overlapNoturnoMin(ini, fim) {
 }
 
 async function montarEspelhoMensal(tenantId, mesNum, anoNum, usuarioFiltroId = null) {
+  // Janela ampliada: captura saída após meia-noite do último dia e entrada na véspera.
   const dataInicio = new Date(anoNum, mesNum - 1, 1);
-  const dataFim = new Date(anoNum, mesNum, 0, 23, 59, 59);
+  dataInicio.setDate(dataInicio.getDate() - 1);
+  dataInicio.setHours(0, 0, 0, 0);
+  const dataFim = new Date(anoNum, mesNum, 1, 23, 59, 59, 999);
 
   const registros = await prisma.registroPonto.findMany({
     where: whereRegistrosNoPeriodo({
