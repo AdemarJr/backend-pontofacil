@@ -3,12 +3,10 @@
  * - ignora registros excluídos (deletedAt)
  * - usa horário efetivo (ajuste.dataHoraNova quando existir)
  */
+const { inicioFimDoDiaBr } = require('../../utils/timezoneBr');
 
 function inicioFimDoDiaLocal(ref) {
-  const d = ref instanceof Date ? ref : new Date(ref);
-  const inicio = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
-  const fim = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
-  return { inicio, fim };
+  return inicioFimDoDiaBr(ref);
 }
 
 function dataHoraEfetiva(registro) {

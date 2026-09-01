@@ -7,6 +7,7 @@ const {
   fmtTime,
   pad2,
 } = require('../../utils/espelhoCalculo');
+const { fmtDateISOBr, getPartsInTz, zonedDateTimeToUtc, inicioFimDoDiaBr } = require('../../utils/timezoneBr');
 const {
   cltOptsFromTenant,
   horasNormaisDiaMin,
@@ -61,8 +62,7 @@ const STATUS_DIA_LABEL = {
 };
 
 function fmtDateISO(d) {
-  const dt = new Date(d);
-  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+  return fmtDateISOBr(d);
 }
 
 function diasDoMesISO(mesNum, anoNum) {
@@ -490,7 +490,8 @@ function overlapNoturnoMin(ini, fim) {
   let total = 0;
   const cursor = new Date(ini);
   while (cursor < fim) {
-    const h = cursor.getHours();
+    const parts = getPartsInTz(cursor);
+    const h = parts?.hour ?? 0;
     if (h >= 22 || h < 5) total += 1;
     cursor.setMinutes(cursor.getMinutes() + 1);
   }
@@ -498,11 +499,25 @@ function overlapNoturnoMin(ini, fim) {
 }
 
 async function montarEspelhoMensal(tenantId, mesNum, anoNum, usuarioFiltroId = null) {
-  // Janela ampliada: captura saída após meia-noite do último dia e entrada na véspera.
-  const dataInicio = new Date(anoNum, mesNum - 1, 1);
-  dataInicio.setDate(dataInicio.getDate() - 1);
-  dataInicio.setHours(0, 0, 0, 0);
-  const dataFim = new Date(anoNum, mesNum, 1, 23, 59, 59, 999);
+  // Janela ampliada: captura saída após meia-noite do último dia e entrada na véspera (fuso BR).
+  const lastDayNum = new Date(anoNum, mesNum, 0).getDate();
+  const [yPrev, mPrev, dPrev] = (() => {
+    const firstUtc = Date.UTC(anoNum, mesNum - 1, 1);
+    const prev = new Date(firstUtc - 24 * 60 * 60 * 1000);
+    return [prev.getUTCFullYear(), prev.getUTCMonth() + 1, prev.getUTCDate()];
+  })();
+
+  const dataInicio = zonedDateTimeToUtc({
+    year: yPrev,
+    month: mPrev,
+    day: dPrev,
+    hour: 0,
+    minute: 0,
+    second: 0,
+  });
+  const { fim: dataFim } = inicioFimDoDiaBr(
+    zonedDateTimeToUtc({ year: anoNum, month: mesNum, day: lastDayNum, hour: 12, minute: 0, second: 0 })
+  );
 
   const registros = await prisma.registroPonto.findMany({
     where: whereRegistrosNoPeriodo({

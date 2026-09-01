@@ -2,6 +2,7 @@
 const { uploadFoto, gerarUrlAssinada } = require('../services/s3.service');
 const { validarGeofence, validarEmAlgumLocal } = require('../utils/geofence');
 const { calcularDia, pad2, agruparPontosPorDiaJornada } = require('../utils/espelhoCalculo');
+const { fmtDateISOBr, inicioFimDoDiaBr, isSameDayBr } = require('../utils/timezoneBr');
 const crypto = require('crypto');
 
 const prisma = require('../infra/prisma');
@@ -42,26 +43,15 @@ function diffSegundos(a, b) {
 }
 
 function inicioFimDoDia(date = new Date()) {
-  const d = new Date(date);
-  const inicio = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
-  const fim = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
-  return { inicio, fim };
+  return inicioFimDoDiaBr(date);
 }
 
 function fmtDiaISO(d) {
-  const dt = new Date(d);
-  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+  return fmtDateISOBr(d);
 }
 
 function isSameLocalDay(a, b) {
-  if (!a || !b) return false;
-  const da = new Date(a);
-  const db = new Date(b);
-  return (
-    da.getFullYear() === db.getFullYear() &&
-    da.getMonth() === db.getMonth() &&
-    da.getDate() === db.getDate()
-  );
+  return isSameDayBr(a, b);
 }
 
 function registroResponse(registro, proximoTipo) {
