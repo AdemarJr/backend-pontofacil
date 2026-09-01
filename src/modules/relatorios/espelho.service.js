@@ -4,10 +4,9 @@ const {
   escalaParaDia,
   agruparPontosPorDiaJornada,
   fmtHours,
-  fmtTime,
   pad2,
 } = require('../../utils/espelhoCalculo');
-const { fmtDateISOBr, getPartsInTz, zonedDateTimeToUtc, inicioFimDoDiaBr } = require('../../utils/timezoneBr');
+const { createTimezoneHelper } = require('../../utils/timezoneBr');
 const {
   cltOptsFromTenant,
   horasNormaisDiaMin,
@@ -61,8 +60,8 @@ const STATUS_DIA_LABEL = {
   FUTURO: 'A cumprir',
 };
 
-function fmtDateISO(d) {
-  return fmtDateISOBr(d);
+function fmtDateISO(d, timeZone) {
+  return createTimezoneHelper(timeZone).fmtDateISO(d);
 }
 
 function diasDoMesISO(mesNum, anoNum) {
@@ -110,6 +109,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         toleranciaMinutos: true,
         intervaloMinimoAlmocoMinutos: true,
         modoMarcacao: true,
+        fusoHorario: true,
       },
     }),
     prisma.usuario.findMany({
@@ -131,6 +131,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
   const tol = tenant?.toleranciaMinutos ?? 5;
   const clt = cltOptsFromTenant(tenant);
   const modoMarcacao = tenant?.modoMarcacao || 'QUATRO_BATIDAS';
+  const tz = createTimezoneHelper(tenant?.fusoHorario);
 
   if (colaboradores.length === 0) return {};
 
@@ -196,7 +197,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
       return ini <= dia && fim >= dia;
     }) || null;
 
-  const hojeISO = fmtDateISO(new Date());
+  const hojeISO = tz.fmtDateISO(new Date());
   const pontosPorUsuarioDia = {};
   const pontosBrutosPorUsuario = {};
   for (const r of registros) {
@@ -216,6 +217,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
   for (const uid of Object.keys(pontosBrutosPorUsuario)) {
     pontosPorUsuarioDia[uid] = agruparPontosPorDiaJornada(pontosBrutosPorUsuario[uid], {
       limiteHorasTurno: LIMITE_TURNO_ABERTO_HORAS,
+      timeZone: tz.timeZone,
     });
   }
 
@@ -286,6 +288,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         dataRef: dia,
         clt: clt.ativo ? clt : null,
         modoMarcacao,
+        timeZone: tz.timeZone,
       });
       const minutos = calc.minutosTrabalhados;
 
@@ -298,8 +301,8 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         TIPOS_MARCADOR_MANUAL.includes(comprovante.tipoArquivo) &&
         !comprovante.arquivoKey &&
         !comprovante.arquivoUrl;
-      const admissaoOk = meta?.dataAdmissao ? fmtDateISO(meta.dataAdmissao) <= dia : true;
-      const naoDemitidoNoDia = meta?.dataDemissao ? fmtDateISO(meta.dataDemissao) >= dia : true;
+      const admissaoOk = meta?.dataAdmissao ? tz.fmtDateISO(meta.dataAdmissao) <= dia : true;
+      const naoDemitidoNoDia = meta?.dataDemissao ? tz.fmtDateISO(meta.dataDemissao) >= dia : true;
 
       const dow = new Date(dia + 'T12:00:00').getDay();
       const ehDomingo = dow === 0;
@@ -358,7 +361,7 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         heDiaUtilMin += extrasMinDia;
       }
 
-      minutosNoturnos += calcularMinutosNoturnos(pontos);
+      minutosNoturnos += calcularMinutosNoturnos(pontos, tz.timeZone);
 
       if (diaExigeJornada) resumo.diasUteis += 1;
       if (diaExigeJornada && temAlgumPonto && flags.entradaAtrasada) {
@@ -396,10 +399,10 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
         intervaloMin: calc.intervaloMin,
         intervalo: calc.intervaloMin == null ? '' : fmtHours(calc.intervaloMin),
         marcacoes: {
-          entrada: fmtTime(calc.entrada),
-          saidaAlmoco: fmtTime(calc.saidaAlmoco),
-          retornoAlmoco: fmtTime(calc.retornoAlmoco),
-          saida: fmtTime(calc.saida),
+          entrada: tz.fmtTime(calc.entrada),
+          saidaAlmoco: tz.fmtTime(calc.saidaAlmoco),
+          retornoAlmoco: tz.fmtTime(calc.retornoAlmoco),
+          saida: tz.fmtTime(calc.saida),
         },
         origens: {
           entrada: origemDoTipoEm(pontos, 'ENTRADA', calc.entrada),
@@ -425,8 +428,8 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
               manual: ehMarcadorManual,
             },
           } : {}),
-          ...(meta?.dataAdmissao ? { dataAdmissao: fmtDateISO(meta.dataAdmissao) } : {}),
-          ...(meta?.dataDemissao ? { dataDemissao: fmtDateISO(meta.dataDemissao) } : {}),
+          ...(meta?.dataAdmissao ? { dataAdmissao: tz.fmtDateISO(meta.dataAdmissao) } : {}),
+          ...(meta?.dataDemissao ? { dataDemissao: tz.fmtDateISO(meta.dataDemissao) } : {}),
         },
       };
       totalMinutos += minutos;
@@ -475,22 +478,23 @@ async function montarPorUsuarioEspelho(registros, tenantId, { mesNum, anoNum, us
 }
 
 /** Minutos entre 22h e 5h (adicional noturno CLT simplificado). */
-function calcularMinutosNoturnos(pontos) {
+function calcularMinutosNoturnos(pontos, timeZone) {
   let total = 0;
   const sorted = [...pontos].sort((a, b) => new Date(a.dataHora) - new Date(b.dataHora));
   for (let i = 0; i < sorted.length - 1; i += 2) {
     const ini = new Date(sorted[i].dataHora);
     const fim = new Date(sorted[i + 1].dataHora);
-    total += overlapNoturnoMin(ini, fim);
+    total += overlapNoturnoMin(ini, fim, timeZone);
   }
   return total;
 }
 
-function overlapNoturnoMin(ini, fim) {
+function overlapNoturnoMin(ini, fim, timeZone) {
+  const tz = createTimezoneHelper(timeZone);
   let total = 0;
   const cursor = new Date(ini);
   while (cursor < fim) {
-    const parts = getPartsInTz(cursor);
+    const parts = tz.getPartsInTz(cursor);
     const h = parts?.hour ?? 0;
     if (h >= 22 || h < 5) total += 1;
     cursor.setMinutes(cursor.getMinutes() + 1);
@@ -499,7 +503,13 @@ function overlapNoturnoMin(ini, fim) {
 }
 
 async function montarEspelhoMensal(tenantId, mesNum, anoNum, usuarioFiltroId = null) {
-  // Janela ampliada: captura saída após meia-noite do último dia e entrada na véspera (fuso BR).
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: tenantId },
+    select: { fusoHorario: true },
+  });
+  const tz = createTimezoneHelper(tenant?.fusoHorario);
+
+  // Janela ampliada: captura saída após meia-noite do último dia e entrada na véspera (fuso da empresa).
   const lastDayNum = new Date(anoNum, mesNum, 0).getDate();
   const [yPrev, mPrev, dPrev] = (() => {
     const firstUtc = Date.UTC(anoNum, mesNum - 1, 1);
@@ -507,7 +517,7 @@ async function montarEspelhoMensal(tenantId, mesNum, anoNum, usuarioFiltroId = n
     return [prev.getUTCFullYear(), prev.getUTCMonth() + 1, prev.getUTCDate()];
   })();
 
-  const dataInicio = zonedDateTimeToUtc({
+  const dataInicio = tz.zonedDateTimeToUtc({
     year: yPrev,
     month: mPrev,
     day: dPrev,
@@ -515,8 +525,8 @@ async function montarEspelhoMensal(tenantId, mesNum, anoNum, usuarioFiltroId = n
     minute: 0,
     second: 0,
   });
-  const { fim: dataFim } = inicioFimDoDiaBr(
-    zonedDateTimeToUtc({ year: anoNum, month: mesNum, day: lastDayNum, hour: 12, minute: 0, second: 0 })
+  const { fim: dataFim } = tz.inicioFimDoDia(
+    tz.zonedDateTimeToUtc({ year: anoNum, month: mesNum, day: lastDayNum, hour: 12, minute: 0, second: 0 })
   );
 
   const registros = await prisma.registroPonto.findMany({

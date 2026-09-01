@@ -6,14 +6,12 @@ const {
   intervaloMinimoLegal,
 } = require('../shared/cltJornada');
 const {
-  fmtDateISOBr,
-  fmtTimeBr,
-  minutosDoDiaBr,
+  createTimezoneHelper,
   pad2,
 } = require('./timezoneBr');
 
-function fmtTime(d) {
-  return fmtTimeBr(d);
+function fmtTime(d, timeZone) {
+  return createTimezoneHelper(timeZone).fmtTime(d);
 }
 
 function minutesBetween(a, b) {
@@ -63,27 +61,20 @@ function parseHoraMinutos(str) {
   return h * 60 + min;
 }
 
-function minutosDoDia(dataHora) {
-  return minutosDoDiaBr(dataHora);
+function minutosDoDia(dataHora, timeZone) {
+  return createTimezoneHelper(timeZone).minutosDoDia(dataHora);
 }
 
-/** Escala noturna: saída no dia seguinte (ex.: 18:00 → 06:00). */
-function escalaCruzaMeiaNoite(escala) {
-  if (!escala) return false;
-  const ini = parseHoraMinutos(escala.horaInicio);
-  const fim = parseHoraMinutos(escala.horaFim);
-  return ini != null && fim != null && fim <= ini;
-}
-
-function fmtDateISOLocal(d) {
-  return fmtDateISOBr(d);
+function fmtDateISOLocal(d, timeZone) {
+  return createTimezoneHelper(timeZone).fmtDateISO(d);
 }
 
 /**
  * Agrupa batidas pelo dia de início do turno (ENTRADA),
  * para plantões que cruzam meia-noite.
  */
-function agruparPontosPorDiaJornada(pontos, { limiteHorasTurno = 16 } = {}) {
+function agruparPontosPorDiaJornada(pontos, { limiteHorasTurno = 16, timeZone } = {}) {
+  const tz = createTimezoneHelper(timeZone);
   const sorted = [...(pontos || [])].sort(
     (a, b) => new Date(a.dataHora) - new Date(b.dataHora)
   );
@@ -94,7 +85,7 @@ function agruparPontosPorDiaJornada(pontos, { limiteHorasTurno = 16 } = {}) {
   for (const p of sorted) {
     const tipo = String(p.tipo || '').toUpperCase();
     const dt = new Date(p.dataHora);
-    const diaCivil = fmtDateISOLocal(dt);
+    const diaCivil = tz.fmtDateISO(dt);
     let diaRef = diaCivil;
 
     if (tipo === 'ENTRADA') {
@@ -124,12 +115,28 @@ function agruparPontosPorDiaJornada(pontos, { limiteHorasTurno = 16 } = {}) {
   return porDia;
 }
 
+/** Escala noturna: saída no dia seguinte (ex.: 18:00 → 06:00). */
+function escalaCruzaMeiaNoite(escala) {
+  if (!escala) return false;
+  const ini = parseHoraMinutos(escala.horaInicio);
+  const fim = parseHoraMinutos(escala.horaFim);
+  return ini != null && fim != null && fim <= ini;
+}
+
 /**
  * @param {Array<{tipo:string,dataHora:string|Date}>} pontos
- * @param {{ escala?: object|null, toleranciaMinutos?: number, dataRef?: string, clt?: object|null }} opts
+ * @param {{ escala?: object|null, toleranciaMinutos?: number, dataRef?: string, clt?: object|null, timeZone?: string }} opts
  */
 function calcularDia(pontos, opts = {}) {
-  const { escala, toleranciaMinutos = 5, dataRef, clt = null, modoMarcacao = 'QUATRO_BATIDAS' } = opts;
+  const {
+    escala,
+    toleranciaMinutos = 5,
+    dataRef,
+    clt = null,
+    modoMarcacao = 'QUATRO_BATIDAS',
+    timeZone,
+  } = opts;
+  const tz = createTimezoneHelper(timeZone);
 
   const sorted = [...pontos].sort((a, b) => new Date(a.dataHora) - new Date(b.dataHora));
   const getTipo = (t) => String(t || '').toUpperCase();
@@ -218,31 +225,31 @@ function calcularDia(pontos, opts = {}) {
     const overnight = escalaCruzaMeiaNoite(escalaAplicavel);
 
     if (espEntrada != null && entrada) {
-      entradaAtrasada = minutosDoDia(entrada.dataHora) > espEntrada + tol;
+      entradaAtrasada = tz.minutosDoDia(entrada.dataHora) > espEntrada + tol;
     }
     if (espSaida != null && saida) {
       if (overnight && entrada) {
-        const diaEnt = fmtDateISOLocal(entrada.dataHora);
-        const diaSai = fmtDateISOLocal(saida.dataHora);
+        const diaEnt = tz.fmtDateISO(entrada.dataHora);
+        const diaSai = tz.fmtDateISO(saida.dataHora);
         if (diaSai === diaEnt) {
           // Saiu no mesmo dia civil antes da virada — antecipado em relação ao plantão.
           saidaAntecipada = true;
         } else {
-          saidaAntecipada = minutosDoDia(saida.dataHora) < espSaida - tol;
+          saidaAntecipada = tz.minutosDoDia(saida.dataHora) < espSaida - tol;
         }
       } else {
-        saidaAntecipada = minutosDoDia(saida.dataHora) < espSaida - tol;
+        saidaAntecipada = tz.minutosDoDia(saida.dataHora) < espSaida - tol;
       }
     }
 
     const espSaiAlmoco = parseHoraMinutos(escalaAplicavel.horaSaidaAlmoco);
     const espRetAlmoco = parseHoraMinutos(escalaAplicavel.horaRetornoAlmoco);
     if (espSaiAlmoco != null && saidaAlmoco) {
-      const t = minutosDoDia(saidaAlmoco.dataHora);
+      const t = tz.minutosDoDia(saidaAlmoco.dataHora);
       if (t > espSaiAlmoco + tol) almocoForaDaJanela = true;
     }
     if (espRetAlmoco != null && retornoAlmoco) {
-      const t = minutosDoDia(retornoAlmoco.dataHora);
+      const t = tz.minutosDoDia(retornoAlmoco.dataHora);
       if (t < espRetAlmoco - tol) almocoForaDaJanela = true;
     }
   }

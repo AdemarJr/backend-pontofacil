@@ -90,6 +90,7 @@ async function loginEmail(req, res, next) {
             geofenceAtivo: true,
             permitirTotem: true,
             permitirMeuPonto: true,
+            fusoHorario: true,
             periodoContrato: true,
             contractEndDate: true,
             features: { select: { payrollModuleEnabled: true } },

@@ -6,6 +6,7 @@ const { autenticar, exigirAdmin } = require('../middlewares/auth.middleware');
 const prisma = require('../infra/prisma');
 const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
 const { registrarAuditoria, ipHashFromReq } = require('../shared/auditoria.service');
+const { BRAZIL_TIMEZONES, normalizeTimezone } = require('../utils/timezoneBr');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -23,6 +24,10 @@ function isOutdatedSchemaError(err) {
   const msg = String(err?.message || '');
   return msg.includes('does not exist') && msg.includes('column');
 }
+
+router.get('/fusos-horarios', autenticar, (_req, res) => {
+  res.json(BRAZIL_TIMEZONES);
+});
 
 router.get('/meu/features', autenticar, async (req, res, next) => {
   try {
@@ -55,6 +60,7 @@ router.get('/meu', autenticar, async (req, res, next) => {
           modoMarcacao: true,
           modoInviolavel: true,
           exigirCpfPis: true,
+          fusoHorario: true,
         },
       }),
       lerFeaturesDoTenant(req.tenantId),
@@ -91,6 +97,7 @@ router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
       modoMarcacao,
       modoInviolavel,
       exigirCpfPis,
+      fusoHorario,
     } = req.body;
 
     const antes = await prisma.tenant.findUnique({
@@ -126,6 +133,7 @@ router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
         ...(modoMarcacao !== undefined && { modoMarcacao: String(modoMarcacao) }),
         ...(modoInviolavel !== undefined && { modoInviolavel: Boolean(modoInviolavel) }),
         ...(exigirCpfPis !== undefined && { exigirCpfPis: Boolean(exigirCpfPis) }),
+        ...(fusoHorario !== undefined && { fusoHorario: normalizeTimezone(fusoHorario) }),
       },
     });
 
@@ -143,6 +151,7 @@ router.put('/meu', autenticar, exigirAdmin, async (req, res, next) => {
         permitirMeuPonto,
         geofenceAtivo,
         fotoObrigatoria,
+        fusoHorario,
       },
       actorId: req.usuario.id,
       actorRole: req.usuario.role,

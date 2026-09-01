@@ -2,7 +2,7 @@
 const { uploadFoto, gerarUrlAssinada } = require('../services/s3.service');
 const { validarGeofence, validarEmAlgumLocal } = require('../utils/geofence');
 const { calcularDia, pad2, agruparPontosPorDiaJornada } = require('../utils/espelhoCalculo');
-const { fmtDateISOBr, inicioFimDoDiaBr, isSameDayBr } = require('../utils/timezoneBr');
+const { createTimezoneHelper } = require('../utils/timezoneBr');
 const crypto = require('crypto');
 
 const prisma = require('../infra/prisma');
@@ -42,18 +42,6 @@ function diffSegundos(a, b) {
   return ms / 1000;
 }
 
-function inicioFimDoDia(date = new Date()) {
-  return inicioFimDoDiaBr(date);
-}
-
-function fmtDiaISO(d) {
-  return fmtDateISOBr(d);
-}
-
-function isSameLocalDay(a, b) {
-  return isSameDayBr(a, b);
-}
-
 function registroResponse(registro, proximoTipo) {
   return {
     id: registro.id,
@@ -74,14 +62,13 @@ async function pendenciasColaborador(req, res, next) {
 
     const tenant = await prisma.tenant.findUnique({
       where: { id: tenantId },
-      select: { modoMarcacao: true },
+      select: { modoMarcacao: true, fusoHorario: true },
     });
     const modoMarcacao = tenant?.modoMarcacao || 'QUATRO_BATIDAS';
+    const tz = createTimezoneHelper(tenant?.fusoHorario);
 
     const agora = new Date();
-    const inicioJanela = new Date(agora);
-    inicioJanela.setDate(inicioJanela.getDate() - dias + 1);
-    inicioJanela.setHours(0, 0, 0, 0);
+    const { inicio: inicioJanela } = tz.inicioFimDoDia(new Date(agora.getTime() - (dias - 1) * 24 * 60 * 60 * 1000));
 
     const registros = await prisma.registroPonto.findMany({
       where: { tenantId, usuarioId, deletedAt: null, dataHora: { gte: inicioJanela, lte: agora } },
@@ -96,11 +83,12 @@ async function pendenciasColaborador(req, res, next) {
     }));
     const porDia = agruparPontosPorDiaJornada(pontosFlat, {
       limiteHorasTurno: LIMITE_TURNO_MAX_HORAS,
+      timeZone: tz.timeZone,
     });
 
     const pendencias = [];
     for (const [dia, pontos] of Object.entries(porDia)) {
-      const calc = calcularDia(pontos, { dataRef: dia, modoMarcacao });
+      const calc = calcularDia(pontos, { dataRef: dia, modoMarcacao, timeZone: tz.timeZone });
       if (!calc.flags?.faltandoMarcacao) continue;
 
       const missing = [];
@@ -285,6 +273,7 @@ async function registrar(req, res, next) {
       return res.status(404).json({ error: 'Empresa não encontrada' });
     }
 
+    const tz = createTimezoneHelper(tenant.fusoHorario);
     const modoMarcacao = tenant.modoMarcacao || 'QUATRO_BATIDAS';
     const tiposValidos = tiposPermitidosRegistro(modoMarcacao);
     if (!tiposValidos.includes(tipo)) {
@@ -453,7 +442,7 @@ async function registrar(req, res, next) {
     }
 
     {
-      const { inicio, fim } = inicioFimDoDia(refTime);
+      const { inicio, fim } = tz.inicioFimDoDia(refTime);
       const jaExiste = await prisma.registroPonto.findFirst({
         where: {
           tenantId,
@@ -481,7 +470,7 @@ async function registrar(req, res, next) {
       select: { id: true, tipo: true, dataHora: true, validado: true },
     });
 
-    const ultimoEhHoje = Boolean(ultimo) && isSameLocalDay(ultimo.dataHora, refTime);
+    const ultimoEhHoje = Boolean(ultimo) && tz.isSameDay(ultimo.dataHora, refTime);
     const cicloAberto = turnoAbertoContinua(ultimo, refTime, {
       modoMarcacao,
       limiteHoras: LIMITE_TURNO_MAX_HORAS,
@@ -603,7 +592,7 @@ async function registrar(req, res, next) {
                 usuarioId,
                 deletedAt: null,
                 dataHora: (() => {
-                  const { inicio, fim } = inicioFimDoDia(refTime);
+                  const { inicio, fim } = tz.inicioFimDoDia(refTime);
                   return { gte: inicio, lte: fim };
                 })(),
               },
@@ -766,9 +755,10 @@ async function ultimoPonto(req, res, next) {
 
     const tenant = await prisma.tenant.findUnique({
       where: { id: tenantId },
-      select: { modoMarcacao: true },
+      select: { modoMarcacao: true, fusoHorario: true },
     });
     const modoMarcacao = tenant?.modoMarcacao || 'QUATRO_BATIDAS';
+    const tz = createTimezoneHelper(tenant?.fusoHorario);
 
     const ultimo = await prisma.registroPonto.findFirst({
       where: { usuarioId, tenantId, deletedAt: null },
@@ -781,7 +771,7 @@ async function ultimoPonto(req, res, next) {
       modoMarcacao,
       limiteHoras: LIMITE_TURNO_MAX_HORAS,
     });
-    const ultimoEhHoje = Boolean(ultimo) && isSameLocalDay(ultimo.dataHora, agora);
+    const ultimoEhHoje = Boolean(ultimo) && tz.isSameDay(ultimo.dataHora, agora);
     const proximoTipo = resolverProximoTipo(ultimo, agora, {
       modoMarcacao,
       limiteHoras: LIMITE_TURNO_MAX_HORAS,
