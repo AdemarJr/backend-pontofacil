@@ -15,6 +15,7 @@ const {
 } = require('../utils/espelhoCalculo');
 
 const prisma = require('../infra/prisma');
+const { fmtDateISOBr, inicioFimDoDiaBr, minutosDoDiaBr, zonedDateTimeToUtc } = require('../utils/timezoneBr');
 const { montarPorUsuarioEspelho, montarEspelhoMensal } = require('../modules/relatorios/espelho.service');
 const { criarRegistroPonto } = require('../modules/ponto/registroPonto.service');
 const { buscarDuplicataDia, payloadDuplicataDia } = require('../modules/ponto/registroDuplicataDia');
@@ -109,8 +110,7 @@ function parseDataHoraGerenteInput(value) {
 }
 
 function fmtDateISO(d) {
-  const dt = new Date(d);
-  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+  return fmtDateISOBr(d);
 }
 
 function diasDoMesISO(mesNum, anoNum) {
@@ -875,10 +875,9 @@ async function resumoDia(req, res, next) {
   try {
     const tenantId = req.tenantId;
     const hoje = new Date();
-    const inicio = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
-    const fim = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate(), 23, 59, 59, 999);
+    const { inicio, fim } = inicioFimDoDiaBr(hoje);
     const diaIso = fmtDateISO(hoje);
-    const agoraMin = hoje.getHours() * 60 + hoje.getMinutes();
+    const agoraMin = minutosDoDiaBr(hoje);
 
     const tenant = await prisma.tenant.findUnique({
       where: { id: tenantId },
