@@ -3,10 +3,10 @@
  * - ignora registros excluídos (deletedAt)
  * - usa horário efetivo (ajuste.dataHoraNova quando existir)
  */
-const { inicioFimDoDiaBr } = require('../../utils/timezoneBr');
+const { createTimezoneHelper } = require('../../utils/timezoneBr');
 
-function inicioFimDoDiaLocal(ref) {
-  return inicioFimDoDiaBr(ref);
+function inicioFimDoDiaLocal(ref, timeZone) {
+  return createTimezoneHelper(timeZone).inicioFimDoDia(ref);
 }
 
 function dataHoraEfetiva(registro) {
@@ -17,12 +17,12 @@ function dataHoraEfetiva(registro) {
 /**
  * @returns {Promise<{ id, tipo, dataHora, dataHoraEfetiva, origem, ajustado } | null>}
  */
-async function buscarDuplicataDia(prismaClient, { tenantId, usuarioId, tipo, dataReferencia }) {
+async function buscarDuplicataDia(prismaClient, { tenantId, usuarioId, tipo, dataReferencia, timeZone }) {
   const tipoUp = String(tipo || '').toUpperCase();
   const ref = dataReferencia instanceof Date ? dataReferencia : new Date(dataReferencia);
   if (Number.isNaN(ref.getTime())) return null;
 
-  const { inicio, fim } = inicioFimDoDiaLocal(ref);
+  const { inicio, fim } = inicioFimDoDiaLocal(ref, timeZone);
 
   const jaExiste = await prismaClient.registroPonto.findFirst({
     where: {
