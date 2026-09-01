@@ -175,6 +175,35 @@ async function espelhoPonto(req, res, next) {
   }
 }
 
+function formatContextoDia(d, ctx) {
+  if (!ctx) return '';
+  if (ctx?.feriado?.nome && ctx?.feriado?.suspendeExpediente) return `Feriado: ${ctx.feriado.nome}`;
+  if (ctx?.ferias) return `Férias (${ctx.ferias.dataInicio} → ${ctx.ferias.dataFim})`;
+  if (ctx?.ausencia) {
+    const pref = ctx.ausencia.tipo === 'FOLGA' ? 'Folga' : 'Falta justificada';
+    return ctx.ausencia.descricao ? `${pref}: ${ctx.ausencia.descricao}` : pref;
+  }
+  if (d.statusDia === STATUS_DIA.ANTES_ADMISSAO && ctx?.dataAdmissao) {
+    return `Antes da admissão (a partir de ${ctx.dataAdmissao})`;
+  }
+  if (d.statusDia === STATUS_DIA.POS_DEMISSAO && ctx?.dataDemissao) {
+    return `Após demissão (${ctx.dataDemissao})`;
+  }
+  return '';
+}
+
+/** Versão curta do contexto para caber no PDF sem sobrepor linhas. */
+function abbrevContextoPdf(text) {
+  if (!text) return '';
+  const preAdm = /^Antes da admissão \(a partir de (\d{4})-(\d{2})-(\d{2})\)$/.exec(text);
+  if (preAdm) return `Pré-adm. ${preAdm[3]}/${preAdm[2]}/${preAdm[1].slice(2)}`;
+  const posDem = /^Após demissão \((\d{4})-(\d{2})-(\d{2})\)$/.exec(text);
+  if (posDem) return `Pós-dem. ${posDem[3]}/${posDem[2]}/${posDem[1].slice(2)}`;
+  if (text.startsWith('Férias (')) return 'Férias';
+  if (text.length > 28) return `${text.slice(0, 26)}…`;
+  return text;
+}
+
 function buildEspelhoRows(relatorio, periodo) {
   const rows = [];
   for (const item of relatorio) {
@@ -185,16 +214,7 @@ function buildEspelhoRows(relatorio, periodo) {
       const esp = d.esperado || null;
       const o = d.origens || {};
       const ctx = d.contextoDia || null;
-      let contextoDia = '';
-      if (ctx?.feriado?.nome && ctx?.feriado?.suspendeExpediente) contextoDia = `Feriado: ${ctx.feriado.nome}`;
-      else if (ctx?.ferias) contextoDia = `Férias (${ctx.ferias.dataInicio} → ${ctx.ferias.dataFim})`;
-      else if (ctx?.ausencia) {
-        const pref = ctx.ausencia.tipo === 'FOLGA' ? 'Folga' : 'Falta justificada';
-        contextoDia = ctx.ausencia.descricao ? `${pref}: ${ctx.ausencia.descricao}` : pref;
-      } else if (ctx?.suspendeExpediente) {
-        if (ctx?.dataAdmissao) contextoDia = `Antes da admissão (a partir de ${ctx.dataAdmissao})`;
-        else if (ctx?.dataDemissao) contextoDia = `Após demissão (${ctx.dataDemissao})`;
-      }
+      const contextoDia = formatContextoDia(d, ctx);
       rows.push({
         periodo: `${pad2(periodo.mes)}/${periodo.ano}`,
         dia,
@@ -315,23 +335,43 @@ function renderEspelhoPdf(doc, rows, periodoLabel) {
   doc.fontSize(10).text(`Período: ${periodoLabel}`, { align: 'left' });
   doc.moveDown(0.5);
 
-  const headers = ['Data', 'Sem.', 'Nome', 'Status', 'Entrada', 'Saída', 'Horas', 'Extras', 'Ctx', 'Flags'];
-  const colW = [44, 22, 92, 58, 34, 34, 34, 34, 68, 68];
-  const startX = doc.x;
+  const headers = [
+    'Data', 'Sem.', 'Nome', 'Status',
+    'Entrada', 'S.Alm.', 'R.Alm.', 'Saída',
+    'Horas', 'Extras', 'Ctx', 'Flags',
+  ];
+  const colW = [40, 18, 68, 46, 28, 28, 28, 28, 26, 26, 48, 48];
+  const startX = doc.page.margins.left;
+  const bottomLimit = doc.page.height - doc.page.margins.bottom;
+  const fontSize = 6.5;
+  const minRowH = 10;
+  const lineGap = 2;
   let y = doc.y;
 
+  function cellHeight(text, width, bold) {
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(fontSize);
+    return doc.heightOfString(String(text ?? ''), { width });
+  }
+
   function rowLine(vals, bold) {
-    let x = startX;
-    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(7);
+    let maxH = minRowH;
     for (let i = 0; i < vals.length; i++) {
-      doc.text(String(vals[i] ?? ''), x, y, { width: colW[i], ellipsis: true });
+      maxH = Math.max(maxH, cellHeight(vals[i], colW[i], bold));
+    }
+    maxH += lineGap;
+
+    if (y + maxH > bottomLimit) {
+      doc.addPage();
+      y = doc.page.margins.top;
+    }
+
+    let x = startX;
+    for (let i = 0; i < vals.length; i++) {
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(fontSize);
+      doc.text(String(vals[i] ?? ''), x, y, { width: colW[i], lineBreak: true });
       x += colW[i];
     }
-    y += 11;
-    if (y > doc.page.height - 40) {
-      doc.addPage();
-      y = doc.y;
-    }
+    y += maxH;
   }
 
   rowLine(headers, true);
@@ -350,10 +390,12 @@ function renderEspelhoPdf(doc, rows, periodoLabel) {
         r.nome,
         r.status || '',
         r.entrada,
+        r.saidaAlmoco,
+        r.retornoAlmoco,
         r.saida,
         r.horasTrabalhadas,
         r.extras,
-        r.contextoDia || '',
+        abbrevContextoPdf(r.contextoDia || ''),
         flags.join(','),
       ],
       false
