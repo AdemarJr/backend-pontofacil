@@ -15,7 +15,8 @@ const {
 } = require('../utils/espelhoCalculo');
 
 const prisma = require('../infra/prisma');
-const { fmtDateISOBr, inicioFimDoDiaBr, minutosDoDiaBr, zonedDateTimeToUtc } = require('../utils/timezoneBr');
+const { createTimezoneHelper, normalizeTimezone, BRAZIL_TIMEZONES } = require('../utils/timezoneBr');
+const { loadTenantTimezone } = require('../shared/tenantTimezone');
 const { montarPorUsuarioEspelho, montarEspelhoMensal } = require('../modules/relatorios/espelho.service');
 const { criarRegistroPonto } = require('../modules/ponto/registroPonto.service');
 const { buscarDuplicataDia, payloadDuplicataDia } = require('../modules/ponto/registroDuplicataDia');
@@ -81,36 +82,14 @@ const STATUS_DIA_LABEL = {
 
 /**
  * Entradas de gerente vindas de <input type="datetime-local"> chegam como "YYYY-MM-DDTHH:mm" sem fuso.
- * No Node em UTC, `new Date(isoSemFuso)` trata como horário UTC — erro típico de ~3h no Brasil.
- * Strings com Z ou offset são interpretadas normalmente.
- * Sem fuso explícito, assume horário civil de Brasília (UTC−3, sem horário de verão desde 2019).
+ * Interpreta no fuso configurado da empresa.
  */
-function parseDataHoraGerenteInput(value) {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
-  const s = String(value ?? '').trim();
-  if (!s) return null;
-  const hasExplicitTz = /(Z|[+\-]\d{2}:?\d{2})$/.test(s);
-  if (hasExplicitTz) {
-    const d = new Date(s);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?/);
-  if (m) {
-    const y = Number(m[1]);
-    const mo = Number(m[2]) - 1;
-    const day = Number(m[3]);
-    const h = Number(m[4]);
-    const mi = Number(m[5]);
-    const sec = m[6] != null ? Number(m[6]) : 0;
-    const offsetBrasiliaHoras = 3;
-    return new Date(Date.UTC(y, mo, day, h + offsetBrasiliaHoras, mi, sec));
-  }
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? null : d;
+function parseDataHoraGerenteInput(value, timeZone) {
+  return createTimezoneHelper(timeZone).parseLocalInput(value);
 }
 
-function fmtDateISO(d) {
-  return fmtDateISOBr(d);
+function fmtDateISO(d, timeZone) {
+  return createTimezoneHelper(timeZone).fmtDateISO(d);
 }
 
 function diasDoMesISO(mesNum, anoNum) {
@@ -874,16 +853,17 @@ async function bancoHorasResumo(req, res, next) {
 async function resumoDia(req, res, next) {
   try {
     const tenantId = req.tenantId;
-    const hoje = new Date();
-    const { inicio, fim } = inicioFimDoDiaBr(hoje);
-    const diaIso = fmtDateISO(hoje);
-    const agoraMin = minutosDoDiaBr(hoje);
-
     const tenant = await prisma.tenant.findUnique({
       where: { id: tenantId },
-      select: { toleranciaMinutos: true },
+      select: { toleranciaMinutos: true, fusoHorario: true },
     });
+    const tz = createTimezoneHelper(tenant?.fusoHorario);
     const tol = tenant?.toleranciaMinutos ?? 5;
+
+    const hoje = new Date();
+    const { inicio, fim } = tz.inicioFimDoDia(hoje);
+    const diaIso = tz.fmtDateISO(hoje);
+    const agoraMin = tz.minutosDoDia(hoje);
 
     const [
       feriadoHoje,
@@ -974,8 +954,8 @@ async function resumoDia(req, res, next) {
     }
 
     const elegiveis = colaboradoresAtivos.filter((u) => {
-      const admOk = u.dataAdmissao ? fmtDateISO(u.dataAdmissao) <= diaIso : true;
-      const naoDemitido = u.dataDemissao ? fmtDateISO(u.dataDemissao) >= diaIso : true;
+      const admOk = u.dataAdmissao ? tz.fmtDateISO(u.dataAdmissao) <= diaIso : true;
+      const naoDemitido = u.dataDemissao ? tz.fmtDateISO(u.dataDemissao) >= diaIso : true;
       return admOk && naoDemitido && !feriasSet.has(u.id);
     });
 
@@ -1043,7 +1023,12 @@ async function resumoDia(req, res, next) {
 
       const pontos = pontosPorUsuario[u.id] || [];
       const escalaDia = escalaParaDia(escalasPorUsuario[u.id] || [], diaIso);
-      const calc = calcularDia(pontos, { escala: escalaDia, toleranciaMinutos: tol, dataRef: diaIso });
+      const calc = calcularDia(pontos, {
+        escala: escalaDia,
+        toleranciaMinutos: tol,
+        dataRef: diaIso,
+        timeZone: tz.timeZone,
+      });
       const temEntrada = Boolean(calc.entrada);
 
       if (temEntrada && calc.flags?.entradaAtrasada) {
@@ -1119,7 +1104,8 @@ async function ajustarPonto(req, res, next) {
     });
     if (!registro) return res.status(404).json({ error: 'Registro não encontrado' });
 
-    const dhNova = parseDataHoraGerenteInput(dataHoraNova);
+    const tz = await loadTenantTimezone(prisma, tenantId);
+    const dhNova = parseDataHoraGerenteInput(dataHoraNova, tz.timeZone);
     if (!dhNova) return res.status(400).json({ error: 'dataHoraNova inválida' });
 
     const ajuste = await prisma.ajustePonto.upsert({
@@ -1174,7 +1160,8 @@ async function inserirPontoManual(req, res, next) {
     });
     if (!alvo) return res.status(404).json({ error: 'Colaborador não encontrado' });
 
-    const dh = parseDataHoraGerenteInput(dataHora);
+    const tz = await loadTenantTimezone(prisma, tenantId);
+    const dh = parseDataHoraGerenteInput(dataHora, tz.timeZone);
     if (!dh) return res.status(400).json({ error: 'dataHora inválida' });
 
     const conflito = await buscarDuplicataDia(prisma, {
@@ -1182,6 +1169,7 @@ async function inserirPontoManual(req, res, next) {
       usuarioId,
       tipo: String(tipo).toUpperCase(),
       dataReferencia: dh,
+      timeZone: tz.timeZone,
     });
     if (conflito) {
       return res.status(409).json(payloadDuplicataDia(conflito));
@@ -1280,9 +1268,10 @@ async function decidirSolicitacaoAjuste(req, res, next) {
     }
 
     // APROVAR: inserir a batida faltante (ADMIN_MANUAL) com motivo contendo a justificativa do colaborador
+    const tz = await loadTenantTimezone(prisma, tenantId);
     const dh =
       dataHoraEfetiva != null && String(dataHoraEfetiva).trim() !== ''
-        ? parseDataHoraGerenteInput(dataHoraEfetiva)
+        ? parseDataHoraGerenteInput(dataHoraEfetiva, tz.timeZone)
         : sol.dataHoraSugerida
           ? new Date(sol.dataHoraSugerida)
           : null;
@@ -1295,6 +1284,7 @@ async function decidirSolicitacaoAjuste(req, res, next) {
       usuarioId: sol.usuarioId,
       tipo: sol.tipo,
       dataReferencia: dh,
+      timeZone: tz.timeZone,
     });
     if (conflito) {
       return res.status(409).json(

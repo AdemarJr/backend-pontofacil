@@ -7,6 +7,7 @@ const { sendConviteUsuario, sendResetUsuarioEmail } = require('../services/passw
 const prisma = require('../infra/prisma');
 const { resolverDadosContrato, diasAteExpiracao } = require('../shared/contractPeriod');
 const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
+const { normalizeTimezone } = require('../utils/timezoneBr');
 const { mapearEnumPorMaxColaboradores } = require('../shared/planLimits');
 const { validarSenhaForte } = require('../shared/passwordPolicy');
 
@@ -74,7 +75,7 @@ async function criarTenant(req, res, next) {
   try {
     const {
       razaoSocial, nomeFantasia, cnpj, email, telefone, plano, planoComercialId,
-      adminNome, adminEmail, adminSenha, modoMarcacao,
+      adminNome, adminEmail, adminSenha, modoMarcacao, fusoHorario,
     } = req.body;
 
     const modoResolvido = resolverModoMarcacao(modoMarcacao);
@@ -132,6 +133,7 @@ async function criarTenant(req, res, next) {
           plano: enumPlano,
           planoComercialId: planoComercialResolved?.id || null,
           modoMarcacao: modoResolvido.modo,
+          fusoHorario: normalizeTimezone(fusoHorario),
         },
       });
       await tx.tenantFeature.create({
@@ -186,7 +188,7 @@ async function atualizarTenant(req, res, next) {
     const { id } = req.params;
     const {
       razaoSocial, nomeFantasia, cnpj, email, telefone, plano, planoComercialId,
-      payrollModuleEnabled, contractStartDate, periodoContrato, modoMarcacao,
+      payrollModuleEnabled, contractStartDate, periodoContrato, modoMarcacao, fusoHorario,
     } = req.body;
 
     let modoMarcacaoAtualizado;
@@ -253,6 +255,7 @@ async function atualizarTenant(req, res, next) {
           ...(telefone !== undefined && { telefone: telefone || null }),
           ...planoPatch,
           ...(modoMarcacaoAtualizado !== undefined && { modoMarcacao: modoMarcacaoAtualizado }),
+          ...(fusoHorario !== undefined && { fusoHorario: normalizeTimezone(fusoHorario) }),
           ...(dadosContrato && dadosContrato),
         },
       });

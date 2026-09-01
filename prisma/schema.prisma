@@ -55,6 +55,8 @@ model Tenant {
   modoInviolavel Boolean      @default(false)
   /// Exige CPF ou PIS no colaborador para registrar ponto
   exigirCpfPis   Boolean      @default(true)
+  /// Fuso IANA para espelho, batidas e limites de dia (ex.: America/Manaus)
+  fusoHorario    String       @default("America/Sao_Paulo")
 
   /// Plano comercial cadastrado pelo Super Admin (valor + limite de colaboradores)
   planoComercialId String?
