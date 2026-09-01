@@ -166,8 +166,14 @@ async function espelhoPonto(req, res, next) {
       porUsuario[uid].fechamento = fechamentoPorUsuario.get(uid) || null;
     }
 
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: tenantId },
+      select: { fusoHorario: true },
+    });
+
     res.json({
       periodo: { mes: mesNum, ano: anoNum },
+      fusoHorario: normalizeTimezone(tenant?.fusoHorario),
       relatorio: Object.values(porUsuario),
     });
   } catch (err) {
