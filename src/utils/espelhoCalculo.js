@@ -5,15 +5,15 @@ const {
   heDiariaLegalMin,
   intervaloMinimoLegal,
 } = require('../shared/cltJornada');
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
-}
+const {
+  fmtDateISOBr,
+  fmtTimeBr,
+  minutosDoDiaBr,
+  pad2,
+} = require('./timezoneBr');
 
 function fmtTime(d) {
-  if (!d) return '';
-  const dt = new Date(d);
-  return `${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
+  return fmtTimeBr(d);
 }
 
 function minutesBetween(a, b) {
@@ -64,8 +64,7 @@ function parseHoraMinutos(str) {
 }
 
 function minutosDoDia(dataHora) {
-  const dt = new Date(dataHora);
-  return dt.getHours() * 60 + dt.getMinutes();
+  return minutosDoDiaBr(dataHora);
 }
 
 /** Escala noturna: saída no dia seguinte (ex.: 18:00 → 06:00). */
@@ -77,8 +76,7 @@ function escalaCruzaMeiaNoite(escala) {
 }
 
 function fmtDateISOLocal(d) {
-  const dt = new Date(d);
-  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+  return fmtDateISOBr(d);
 }
 
 /**
