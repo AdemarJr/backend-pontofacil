@@ -143,12 +143,30 @@ async function loginEmail(req, res, next) {
 // Login do colaborador no TOTEM (por PIN numérico)
 const PIN_LOGIN_MIN_DELAY_MS = 400;
 
+const TENANT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function normalizeTotemTenantId(raw) {
+  return String(raw || '')
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .replace(/[^0-9a-fA-F-]/g, '')
+    .toLowerCase();
+}
+
 async function loginPin(req, res, next) {
   const inicio = Date.now();
   try {
-    const { pin, tenantId, deviceId } = req.body;
+    const { pin, tenantId: tenantIdRaw, deviceId } = req.body;
+    const tenantId = normalizeTotemTenantId(tenantIdRaw);
     if (!pin || !tenantId) {
       return res.status(400).json({ error: 'PIN e tenantId são obrigatórios' });
+    }
+    if (!TENANT_UUID_RE.test(tenantId)) {
+      return res.status(404).json({
+        error: 'Empresa não encontrada. Verifique o código da empresa no totem.',
+        code: 'TENANT_NOT_FOUND',
+      });
     }
 
     const tenant = await prisma.tenant.findUnique({
