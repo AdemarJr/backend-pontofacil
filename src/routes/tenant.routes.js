@@ -174,11 +174,15 @@ router.get('/:tenantId/info', tenantInfoLimiter, async (req, res, next) => {
   try {
     const { tenantId } = req.params;
     if (!UUID_RE.test(tenantId)) {
-      return res.status(404).json({ error: 'Empresa não encontrada' });
+      return res.status(404).json({
+        error: 'Empresa não encontrada. Verifique o código da empresa no totem.',
+        code: 'TENANT_NOT_FOUND',
+      });
     }
 
-    const tenant = await prisma.tenant.findUnique({
-      where: { id: tenantId, status: 'ATIVO' },
+    const id = String(tenantId).trim().toLowerCase();
+    const tenant = await prisma.tenant.findFirst({
+      where: { id, status: 'ATIVO' },
       select: {
         id: true,
         nomeFantasia: true,
@@ -188,7 +192,18 @@ router.get('/:tenantId/info', tenantInfoLimiter, async (req, res, next) => {
         permitirMeuPonto: true,
       },
     });
-    if (!tenant) return res.status(404).json({ error: 'Empresa não encontrada' });
+    if (!tenant) {
+      return res.status(404).json({
+        error: 'Empresa não encontrada. Verifique o código da empresa no totem.',
+        code: 'TENANT_NOT_FOUND',
+      });
+    }
+    if (tenant.permitirTotem === false) {
+      return res.status(403).json({
+        error: 'Registro por totem está desativado para esta empresa',
+        code: 'TOTEM_DISABLED',
+      });
+    }
     res.json(tenant);
   } catch (err) { next(err); }
 });
