@@ -1,7 +1,7 @@
 // src/controllers/usuario.controller.js
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
-const { encryptPin, decryptPin } = require('../utils/pinCrypto');
+const { encryptPin, decryptPin, computePinLookup, normalizePinDigits } = require('../utils/pinCrypto');
 const { sendConviteUsuario, sendResetUsuarioEmail } = require('../services/passwordReset.service');
 const { formatMailError } = require('../shared/smtpHints');
 
@@ -78,7 +78,8 @@ async function criar(req, res, next) {
     if (!nome || !email || !pin) {
       return res.status(400).json({ error: 'Nome, email e PIN são obrigatórios' });
     }
-    if (pin.length < 4 || pin.length > 6 || !/^\d+$/.test(pin)) {
+    const pinNorm = normalizePinDigits(pin);
+    if (pinNorm.length < 4 || pinNorm.length > 6 || !/^\d+$/.test(pinNorm)) {
       return res.status(400).json({ error: 'PIN deve ter 4 a 6 dígitos numéricos' });
     }
 
@@ -88,6 +89,20 @@ async function criar(req, res, next) {
       where: { email: emailNorm, tenantId: req.tenantId }
     });
     if (existente) return res.status(409).json({ error: 'Email já cadastrado nesta empresa' });
+
+    const pinLookup = computePinLookup(req.tenantId, pinNorm);
+    if (pinLookup) {
+      const pinEmUso = await prisma.usuario.findFirst({
+        where: { tenantId: req.tenantId, pinLookup },
+        select: { id: true },
+      });
+      if (pinEmUso) {
+        return res.status(409).json({
+          error: 'Este PIN já está em uso por outro colaborador. Escolha outro PIN.',
+          code: 'PIN_DUPLICATE',
+        });
+      }
+    }
 
     try {
       await assertPodeAdicionarColaborador(req.tenantId, 1);
@@ -103,8 +118,8 @@ async function criar(req, res, next) {
       throw e;
     }
 
-    const pinHash = await bcrypt.hash(pin, 12);
-    const pinEncrypted = encryptPin(pin);
+    const pinHash = await bcrypt.hash(pinNorm, 12);
+    const pinEncrypted = encryptPin(pinNorm);
 
     if (localRegistroId) {
       const loc = await prisma.localRegistro.findFirst({
@@ -135,7 +150,7 @@ async function criar(req, res, next) {
     const usuario = await prisma.usuario.create({
       data: {
         tenantId: req.tenantId,
-        nome, email: emailNorm, pinHash, pinEncrypted,
+        nome, email: emailNorm, pinHash, pinEncrypted, pinLookup,
         cargo: cargo || null,
         departamento: departamento || null,
         role: roleFinal,
@@ -333,11 +348,30 @@ async function atualizar(req, res, next) {
     }
 
     if (pin) {
-      if (pin.length < 4 || !/^\d+$/.test(pin)) {
+      const pinNorm = normalizePinDigits(pin);
+      if (pinNorm.length < 4 || pinNorm.length > 6 || !/^\d+$/.test(pinNorm)) {
         return res.status(400).json({ error: 'PIN inválido' });
       }
-      dados.pinHash = await bcrypt.hash(pin, 12);
-      dados.pinEncrypted = encryptPin(pin);
+      const pinLookup = computePinLookup(req.tenantId, pinNorm);
+      if (pinLookup) {
+        const pinEmUso = await prisma.usuario.findFirst({
+          where: {
+            tenantId: req.tenantId,
+            pinLookup,
+            id: { not: req.params.id },
+          },
+          select: { id: true },
+        });
+        if (pinEmUso) {
+          return res.status(409).json({
+            error: 'Este PIN já está em uso por outro colaborador. Escolha outro PIN.',
+            code: 'PIN_DUPLICATE',
+          });
+        }
+      }
+      dados.pinHash = await bcrypt.hash(pinNorm, 12);
+      dados.pinEncrypted = encryptPin(pinNorm);
+      dados.pinLookup = pinLookup;
     }
 
     const usuario = await prisma.usuario.updateMany({
