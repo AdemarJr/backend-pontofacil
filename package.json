@@ -9,7 +9,8 @@
     "start": "npx prisma migrate deploy && node src/server.js",
     "db:migrate": "npx prisma migrate dev",
     "db:seed": "node prisma/seed.js",
-    "db:studio": "npx prisma studio"
+    "db:studio": "npx prisma studio",
+    "db:backfill-pin-lookup": "node src/scripts/backfill-pin-lookup.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",

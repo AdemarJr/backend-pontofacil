@@ -8,6 +8,7 @@ const prisma = require('../infra/prisma');
 const { isContractExpired, contractExpiredPayload } = require('../shared/contractCheck');
 const { lerFeaturesDoTenant } = require('../shared/tenantFeatures');
 const { setRefreshCookie, clearRefreshCookie, readRefreshToken } = require('../shared/authCookies');
+const { computePinLookup, normalizePinDigits } = require('../utils/pinCrypto');
 
 function enviarSessaoAutenticada(res, tokens, extra = {}) {
   setRefreshCookie(res, tokens.refreshToken);
@@ -202,27 +203,81 @@ async function loginPin(req, res, next) {
       return res.status(403).json(contractExpiredPayload(tenant));
     }
     if (tenant.permitirTotem === false) {
-      return res.status(403).json({ error: 'Registro por totem está desativado para esta empresa' });
+      return res.status(403).json({
+        error: 'Registro por totem está desativado para esta empresa',
+        code: 'TOTEM_DISABLED',
+      });
     }
 
-    // Busca colaboradores ativos do tenant e compara PIN (delay mínimo anti-timing)
-    const usuarios = await prisma.usuario.findMany({
-      where: { tenantId, ativo: true, role: 'COLABORADOR' },
-      select: { id: true, nome: true, pinHash: true, cargo: true, fotoPerfil: true },
-    });
+    const pinNorm = normalizePinDigits(pin);
+    if (!/^\d{4,8}$/.test(pinNorm)) {
+      return res.status(401).json({
+        error: 'PIN inválido. Use apenas números (4 a 8 dígitos).',
+        code: 'PIN_INVALID',
+      });
+    }
+
+    const userSelect = {
+      id: true,
+      nome: true,
+      pinHash: true,
+      pinLookup: true,
+      cargo: true,
+      fotoPerfil: true,
+    };
 
     let usuarioEncontrado = null;
-    for (const u of usuarios) {
-      if (!u.pinHash) continue;
-      const match = await bcrypt.compare(String(pin), u.pinHash);
-      if (match) {
-        usuarioEncontrado = u;
-        break;
+    const pinLookup = computePinLookup(tenantId, pinNorm);
+
+    // Caminho rápido O(1): índice HMAC por empresa + verificação bcrypt só no candidato
+    if (pinLookup) {
+      const candidato = await prisma.usuario.findFirst({
+        where: { tenantId, ativo: true, role: 'COLABORADOR', pinLookup },
+        select: userSelect,
+      });
+      if (candidato?.pinHash) {
+        const match = await bcrypt.compare(pinNorm, candidato.pinHash);
+        if (match) usuarioEncontrado = candidato;
+      }
+    }
+
+    // Fallback legado: usuários sem pinLookup (antes da migration). Preenche o índice ao acertar.
+    if (!usuarioEncontrado) {
+      const usuarios = await prisma.usuario.findMany({
+        where: {
+          tenantId,
+          ativo: true,
+          role: 'COLABORADOR',
+          ...(pinLookup ? { pinLookup: null } : {}),
+        },
+        select: userSelect,
+      });
+
+      for (const u of usuarios) {
+        if (!u.pinHash) continue;
+        const match = await bcrypt.compare(pinNorm, u.pinHash);
+        if (match) {
+          usuarioEncontrado = u;
+          if (pinLookup) {
+            try {
+              await prisma.usuario.update({
+                where: { id: u.id },
+                data: { pinLookup },
+              });
+            } catch {
+              /* colisão de PIN duplicado legado — login ainda segue */
+            }
+          }
+          break;
+        }
       }
     }
 
     if (!usuarioEncontrado) {
-      return res.status(401).json({ error: 'PIN inválido' });
+      return res.status(401).json({
+        error: 'PIN inválido. Confira o PIN ou peça ao RH para redefinir.',
+        code: 'PIN_INVALID',
+      });
     }
 
     assertJwtConfig();
