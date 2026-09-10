@@ -209,6 +209,8 @@ model Usuario {
   nome        String
   email       String
   pinHash     String   // PIN numérico hasheado (usado no totem)
+  /// Índice determinístico (HMAC) para login O(1) no totem; único por empresa quando preenchido.
+  pinLookup   String?
   /// Senha de login web (painel / meu ponto). Se null, o login web aceita o PIN via pinHash (compatibilidade).
   senhaHash   String?
   pinEncrypted String? // PIN criptografado (reversível) para exibição por ADMIN/SUPER_ADMIN
@@ -285,6 +287,7 @@ model Usuario {
   espelhoFechamentosSolicitados  EspelhoFechamento[] @relation("EspelhoFechamentoSolicitadoPor")
 
   @@unique([tenantId, email])
+  @@unique([tenantId, pinLookup])
   @@index([tenantId])
   @@index([passwordResetToken])
   @@map("usuarios")

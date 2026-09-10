@@ -42,5 +42,24 @@ function decryptPin(payload) {
   return plaintext.toString('utf8');
 }
 
-module.exports = { encryptPin, decryptPin };
+/**
+ * HMAC-SHA256(tenantId:pin) com a mesma chave de criptografia do PIN.
+ * Permite findUnique/findFirst O(1) no login do totem sem varrer bcrypt.
+ * Retorna null se a chave não estiver configurada.
+ */
+function computePinLookup(tenantId, pin) {
+  const key = getKey();
+  if (!key || !tenantId || pin == null || pin === '') return null;
+  const normalized = String(pin).trim();
+  if (!/^\d{4,8}$/.test(normalized)) return null;
+  return crypto
+    .createHmac('sha256', key)
+    .update(`${tenantId}:${normalized}`, 'utf8')
+    .digest('hex');
+}
 
+function normalizePinDigits(pin) {
+  return String(pin ?? '').replace(/\D/g, '');
+}
+
+module.exports = { encryptPin, decryptPin, computePinLookup, normalizePinDigits };
