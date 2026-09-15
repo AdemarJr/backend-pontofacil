@@ -74,22 +74,19 @@ function cltOptsFromTenant(tenant) {
 
 function validarEscalaCLT(
   cargaHorariaDiaria,
-  diasSemana,
+  _diasSemana,
   intervaloMinutos,
   intervaloCCTMinutos = 60,
   { overnight = false } = {}
 ) {
   const carga = Number(cargaHorariaDiaria) || 8;
-  const dias = Array.isArray(diasSemana) ? diasSemana.length : 0;
   const maxDiaria = overnight ? 12 : 8;
   if (carga > maxDiaria) {
     return overnight
       ? 'Carga horária diária em turno noturno não pode exceder 12 horas.'
       : 'Carga horária diária não pode exceder 8 horas (limite CLT).';
   }
-  if (carga * dias > 44) {
-    return `Jornada semanal da escala (${(carga * dias).toFixed(1)}h) excede 44 horas (limite CLT).`;
-  }
+  // Jornada semanal > 44h é permitida na escala; o excedente vira HE no espelho/folha.
   if (overnight && Number(intervaloMinutos) === 0) {
     return null;
   }
