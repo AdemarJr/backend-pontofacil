@@ -468,13 +468,7 @@ async function reenviarConvite(req, res, next) {
 
     const r = await sendConviteUsuario(usuario.id);
     if (!r?.ok) {
-      const err = new Error(
-        r?.skipped
-          ? (r.reason === 'smtp_sem_senha'
-              ? 'SMTP_PASS não configurado no servidor.'
-              : 'Servidor sem SMTP configurado para envio de e-mails.')
-          : formatMailError(r)
-      );
+      const err = new Error(formatMailError(r));
       err.status = r?.skipped ? 503 : 502;
       throw err;
     }
@@ -500,13 +494,7 @@ async function resetSenhaEmail(req, res, next) {
 
     const r = await sendResetUsuarioEmail(usuario);
     if (!r?.ok) {
-      const err = new Error(
-        r?.skipped
-          ? (r.reason === 'smtp_sem_senha'
-              ? 'SMTP_PASS não configurado no servidor.'
-              : 'Servidor sem SMTP configurado para envio de e-mails.')
-          : formatMailError(r)
-      );
+      const err = new Error(formatMailError(r));
       err.status = r?.skipped ? 503 : 502;
       throw err;
     }
