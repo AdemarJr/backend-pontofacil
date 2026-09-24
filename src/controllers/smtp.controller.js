@@ -4,7 +4,7 @@ const {
   getMailPublicConfig,
   resetTransporter,
 } = require('../services/mail.service');
-const { dicaParaErroSmtp, formatMailError } = require('../shared/smtpHints');
+const { dicaParaErroSmtp, formatMailErrorOps } = require('../shared/smtpHints');
 
 async function statusSmtp(req, res) {
   res.json(getMailPublicConfig());
@@ -49,7 +49,7 @@ async function testarSmtp(req, res, next) {
       if (!envio.ok) {
         return res.status(502).json({
           ok: false,
-          error: formatMailError(envio),
+          error: formatMailErrorOps(envio),
           config,
         });
       }

@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { PrismaClient } = require('@prisma/client');
 const { sendConviteUsuario, sendResetUsuarioEmail } = require('../services/passwordReset.service');
+const { formatMailErrorOps } = require('../shared/smtpHints');
 
 const prisma = require('../infra/prisma');
 const { resolverDadosContrato, diasAteExpiracao } = require('../shared/contractPeriod');
@@ -439,7 +440,7 @@ async function criarAdminTenant(req, res, next) {
         const r = await sendConviteUsuario(usuario.id);
         conviteEmailEnviado = Boolean(r.ok);
         if (!r.ok) {
-          conviteEmailErro = r.skipped ? 'SMTP não configurado' : (r.reason || 'Falha ao enviar convite');
+          conviteEmailErro = formatMailErrorOps(r) || 'Falha ao enviar convite';
         }
       } catch (e) {
         console.error('[superadmin/criarAdmin] Convite falhou (admin já criado):', e?.message || e);
